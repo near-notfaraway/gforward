@@ -106,7 +106,7 @@ func (lh *ListenHandler) OnTraffic(c gnet.Conn) gnet.Action {
 }
 
 func (lh *ListenHandler) OnClose(c gnet.Conn, err error) (action gnet.Action) {
-	log.Printf("close user conn %p, err: %s", c, err.Error())
+	log.Printf("close user conn %p, err: %s", c, err)
 	delete(lh.userConnMapDestination, c)
 	sc, ok := lh.userConnMapServerConn[c]
 	if ok {
