@@ -26,11 +26,12 @@ func (p *HTTPProxyDestinationParser) ParseAndAck(buf []byte) (dest string, ack [
 	}
 
 	// 非 Connect 方法则相当于走 HTTP 透明代理，不需要返回 ACK
-	dest = extractDestinationFromHTTPRequest(httpReq, 443)
+	dest = extractDestWithPort(httpReq.Host, 80)
 	if httpReq.Method != http.MethodConnect {
 		return dest, nil, nil
 	}
 
+	// Connect 方法需要返回 ACK
 	ack = []byte(fmt.Sprintf(httpProxyAckFormat, httpReq.Proto))
 	return dest, ack, nil
 }

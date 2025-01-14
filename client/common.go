@@ -123,10 +123,10 @@ func (lh *ListenHandler) RecvFromDialer() {
 			case pkt := <-lh.dialer.RecvChan():
 				uc, ok := lh.serverConnMapUserConn[pkt.Conn]
 				if !ok {
-					log.Printf("failed to lookup user conn by server conn %p", pkt.Conn)
+					log.Printf("[client] failed to lookup user conn by server conn %p", pkt.Conn)
 					continue
 				}
-				log.Printf("success lookup user conn %p by server conn %p", uc, pkt.Conn)
+				log.Printf("[client] success lookup user conn by server conn %p: %p", pkt.Conn, uc)
 				n, err := uc.Write(pkt.Pkt.GetPayload())
 				if err != nil || n != len(pkt.Pkt.GetPayload()) {
 					log.Printf("[client] send to user conn %p failed: %s", uc, err)
