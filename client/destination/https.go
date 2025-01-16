@@ -1,8 +1,9 @@
-package client
+package destination
 
 import (
 	"encoding/binary"
 	"fmt"
+	"github.com/panjf2000/gnet/v2"
 	"strings"
 )
 
@@ -15,54 +16,65 @@ const (
 	tlsServerNameTypeHost       = 0
 )
 
-type HTTPSDestinationParser struct{}
+type HTTPSParser struct{}
+
+func NewHTTPSParser() *HTTPSParser {
+	return &HTTPSParser{}
+}
 
 // ParseAndAck 根据 TLS 识别 SNI 来获取目的地
 // https://datatracker.ietf.org/doc/html/rfc8446 [The Transport Layer Security (TLS) Protocol Version 1.3]
 // https://datatracker.ietf.org/doc/html/rfc6066 [Transport Layer Security (TLS) Extensions: Extension Definitions]
-func (p *HTTPSDestinationParser) ParseAndAck(buf []byte) (dest string, ack []byte, error error) {
+func (p *HTTPSParser) Parse(conn gnet.Conn) (string, error) {
 	// 校验是否为 TLS Handshake 的 Client Hello
+	buf, err := conn.Next(10)
+	if err != nil {
+		return "", err
+	}
 	if len(buf) < tlsRecordLen || buf[0] != tlsRecordTypeHandshake {
-		return "", nil, fmt.Errorf("not TLS Handshark")
+		return "", fmt.Errorf("not TLS Handshark")
 	}
 	if buf[1] != tlsMainVersionV3 {
-		return "", nil, fmt.Errorf("TLS version less than 3")
+		return "", fmt.Errorf("TLS version less than 3")
 	}
 	if buf[5] != tlsHandshakeTypeClientHello {
-		return "", nil, fmt.Errorf("not TLS Handshark Client Hello")
+		return "", fmt.Errorf("not TLS Handshark Client Hello")
 	}
+
+	// 读取 TLS Handshake 的 buf
 	hsLengthBuf := append([]byte{0}, buf[6:9]...)
 	hsLength := int(binary.BigEndian.Uint32(hsLengthBuf))
-	if len(buf[9:]) != hsLength {
-		return "", nil, fmt.Errorf("TLS Handshark Client Hello length invalid")
+	hsBuf, err := conn.Next(hsLength)
+	if len(hsBuf) != hsLength {
+		return "", fmt.Errorf("TLS Handshark Client Hello length invalid")
 	}
 
 	// 找到 extensions 的起始位置
-	sessionIdLen := int(buf[43])
-	cipherSuitListLen := int(buf[44+sessionIdLen])<<8 + int(buf[45+sessionIdLen])
-	compressionMethodLen := int(buf[46+sessionIdLen+cipherSuitListLen])
-	extensionsLenPos := 47 + sessionIdLen + cipherSuitListLen + compressionMethodLen
-	extensionsLen := int(binary.BigEndian.Uint16(buf[extensionsLenPos : extensionsLenPos+2]))
+	sessionIdLen := int(hsBuf[33])
+	cipherSuitListLen := int(hsBuf[34+sessionIdLen])<<8 + int(hsBuf[35+sessionIdLen])
+	compressionMethodLen := int(hsBuf[46+sessionIdLen+cipherSuitListLen])
+	extensionsLenPos := 37 + sessionIdLen + cipherSuitListLen + compressionMethodLen
+	extensionsLen := int(binary.BigEndian.Uint16(hsBuf[extensionsLenPos : extensionsLenPos+2]))
 	extensionsPos := extensionsLenPos + 2
-	if len(buf[extensionsPos:]) != extensionsLen {
-		return "", nil, fmt.Errorf("TLS Handshark extensions length invalid in message")
+	if len(hsBuf[extensionsPos:]) != extensionsLen {
+		return "", fmt.Errorf("TLS Handshark extensions length invalid in message")
 	}
 
 	// 迭代所有的 extensions 找到 sni
-	for pos := extensionsPos; pos < len(buf); {
-		extensionType := binary.BigEndian.Uint16(buf[pos : pos+2])
-		extensionLen := binary.BigEndian.Uint16(buf[pos+2 : pos+4])
+	for pos := extensionsPos; pos < len(hsBuf); {
+		extensionType := binary.BigEndian.Uint16(hsBuf[pos : pos+2])
+		extensionLen := binary.BigEndian.Uint16(hsBuf[pos+2 : pos+4])
 		if extensionType == tlsExtensionTypeServerName {
-			if buf[pos+6] == tlsServerNameTypeHost {
-				nameLen := binary.BigEndian.Uint16(buf[pos+7 : pos+9])
-				host := string(buf[pos+9 : pos+9+int(nameLen)])
-				return extractDestWithPort(host, 443), nil, nil
+			if hsBuf[pos+6] == tlsServerNameTypeHost {
+				nameLen := binary.BigEndian.Uint16(hsBuf[pos+7 : pos+9])
+				host := string(hsBuf[pos+9 : pos+9+int(nameLen)])
+				return extractDestWithPort(host, 443), nil
 			}
 		}
 		pos += 4 + int(extensionLen)
 	}
 
-	return "", nil, fmt.Errorf("not found sni in TLS Handshark extensions")
+	return "", fmt.Errorf("not found sni in TLS Handshark extensions")
 }
 
 // extractDestWithPort 若 host 不包含端口则为其补充默认端口

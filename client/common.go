@@ -1,27 +1,18 @@
 package client
 
 import (
+	"fmt"
+	"github.com/near-notfaraway/gtunnel/client/destination"
 	"github.com/near-notfaraway/gtunnel/dialer"
 	"github.com/near-notfaraway/gtunnel/protocol"
 	"github.com/panjf2000/gnet/v2"
 	"log"
 )
 
-const (
-	_ = iota
-	AccessTypeHTTP
-	AccessTypeHTTPS
-	AccessTypeHTTPProxy
-)
-
-type DestinationParser interface {
-	ParseAndAck(buf []byte) (dest string, ack []byte, error error)
-}
-
 type ListenHandler struct {
 	gnet.BuiltinEventEngine
 
-	destinationParser      DestinationParser
+	destinationParser      destination.Parser
 	userConnMapDestination map[gnet.Conn]string
 	userConnMapServerConn  map[gnet.Conn]gnet.Conn
 	serverConnMapUserConn  map[gnet.Conn]gnet.Conn
@@ -30,12 +21,14 @@ type ListenHandler struct {
 	dialer           *dialer.Dialer
 }
 
-func NewListenHandler() *ListenHandler {
-	return &ListenHandler{}
+func NewListenHandler(mode string) *ListenHandler {
+	return &ListenHandler{
+		destinationParser: destination.NewParser(destination.ParserProto(mode)),
+	}
 }
 
 func (lh *ListenHandler) OnBoot(e gnet.Engine) (action gnet.Action) {
-	lh.destinationParser = &HTTPProxyDestinationParser{}
+	lh.destinationParser = destination.NewParser(destination.ParserProtoSocks5)
 	lh.userConnMapDestination = make(map[gnet.Conn]string)
 	lh.userConnMapServerConn = make(map[gnet.Conn]gnet.Conn)
 	lh.serverConnMapUserConn = make(map[gnet.Conn]gnet.Conn)
@@ -46,22 +39,21 @@ func (lh *ListenHandler) OnBoot(e gnet.Engine) (action gnet.Action) {
 }
 
 func (lh *ListenHandler) OnTraffic(c gnet.Conn) gnet.Action {
-	buf, _ := c.Next(-1)
-	log.Printf("[client] recv from user: %d", len(buf))
 	var destination string
-	var acknowledge []byte
 	dest, ok := lh.userConnMapDestination[c]
 	if ok {
 		destination = dest
 	} else {
-		dest_, ack, err := lh.destinationParser.ParseAndAck(buf)
+		dest_, err := lh.destinationParser.Parse(c)
 		if err != nil {
 			log.Printf("[client] destination parse failed: %s", err.Error())
 			return gnet.Close
 		}
+		if dest_ == "" {
+			return gnet.None
+		}
 		log.Printf("destination is: %s", dest_)
 		destination = dest_
-		acknowledge = ack
 		lh.userConnMapDestination[c] = destination
 	}
 
@@ -79,17 +71,13 @@ func (lh *ListenHandler) OnTraffic(c gnet.Conn) gnet.Action {
 		serverConn = sc_
 	}
 
-	// need ack though user conn
-	if len(acknowledge) > 0 {
-		if _, err := c.Write(acknowledge); err != nil {
-			log.Printf("[client] ack to user failed: %s", err.Error())
-		}
-		log.Printf("[client] ack to user len: %d", len(acknowledge))
-		return gnet.None
-	}
-
 	// need forward though server conn
 	pkt := lh.internalProtocol.New()
+	buf, err := c.Peek(-1)
+	if err != nil {
+		log.Printf(fmt.Sprintf("[client] recv from user conn failed: %s", err))
+		return gnet.Close
+	}
 	pkt.SetPayload(buf)
 	pkt.SetDestination(destination)
 	outBuf, err := pkt.Marshal()

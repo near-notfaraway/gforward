@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	ClientModeHTTPDNS   = "http_dns"
-	ClientModeHTTPSDNS  = "https_dns"
-	ClientModeHTTPProxy = "http_proxy"
+	ClientModeHTTPDNS    = "http_dns"
+	ClientModeHTTPSDNS   = "https_dns"
+	ClientModeHTTPProxy  = "http_proxy"
+	ClientModeHTTPSocks5 = "socks5"
 )
 
 var clientCmd *cobra.Command
@@ -29,25 +30,33 @@ func init() {
 		},
 	}
 	clientCmd.Flags().StringVarP(&clientMode, "mode", "m",
-		"http_proxy", "one of http_dns,https_dns,http_proxy")
+		"http_proxy", "one of http_dns,https_dns,http_proxy,socks5")
 	clientCmd.Flags().IntVarP(&clientPort, "port", "p",
-		8989, "listen port")
+		0, "depend on mode, must http_dns:80, https_dns:443, default http_proxy:8080, socks5:1080")
 	clientCmd.Flags().BoolVar(&clientMulticore, "multicore",
 		true, "run with multicore")
 }
 
 func clientRun(cmd *cobra.Command, args []string) {
-	cli := client.NewListenHandler()
 	switch clientMode {
 	case ClientModeHTTPDNS:
-		log.Fatal(gnet.Run(cli, fmt.Sprintf("tcp://:%d", 80), gnet.WithMulticore(clientMulticore)))
+		clientPort = 80
 	case ClientModeHTTPSDNS:
-		log.Fatal(gnet.Run(cli, fmt.Sprintf("tcp://:%d", 443), gnet.WithMulticore(clientMulticore)))
+		clientPort = 443
 	case ClientModeHTTPProxy:
-		log.Fatal(gnet.Run(cli, fmt.Sprintf("tcp://:%d", clientPort), gnet.WithMulticore(clientMulticore)))
+		if clientPort == 0 {
+			clientPort = 8080
+		}
+	case ClientModeHTTPSocks5:
+		if clientPort == 0 {
+			clientPort = 1080
+		}
 	default:
 		log.Fatalf("invalid client mode %s", clientMode)
 	}
+
+	cli := client.NewListenHandler(clientMode)
+	log.Fatal(gnet.Run(cli, fmt.Sprintf("tcp://:%d", clientPort), gnet.WithMulticore(clientMulticore)))
 }
 
 func main() {
@@ -56,6 +65,7 @@ func main() {
 	//	Addr:    "10.74.54.120:53",
 	//	Net:     "udp",
 	//	Handler: nil,
+
 	//}
 	//go func() {
 	//	err := server.ListenAndServe()
