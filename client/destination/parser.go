@@ -28,6 +28,6 @@ func NewParser(proto ParserProto) Parser {
 	case ParserProtoSocks5:
 		return NewSocks5Parser()
 	default:
-		return nil
+		panic("invalid parser proto")
 	}
 }

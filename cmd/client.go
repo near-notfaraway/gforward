@@ -19,6 +19,7 @@ var clientCmd *cobra.Command
 var clientMode string
 var clientPort int
 var clientMulticore bool
+var clientServerAddr string
 
 func init() {
 	clientCmd = &cobra.Command{
@@ -33,6 +34,8 @@ func init() {
 		"http_proxy", "one of http_dns,https_dns,http_proxy,socks5")
 	clientCmd.Flags().IntVarP(&clientPort, "port", "p",
 		0, "depend on mode, must http_dns:80, https_dns:443, default http_proxy:8080, socks5:1080")
+	clientCmd.Flags().StringVarP(&clientServerAddr, "server", "s",
+		"127.0.0.1:9989", "addr of server")
 	clientCmd.Flags().BoolVar(&clientMulticore, "multicore",
 		true, "run with multicore")
 }
@@ -55,7 +58,7 @@ func clientRun(cmd *cobra.Command, args []string) {
 		log.Fatalf("invalid client mode %s", clientMode)
 	}
 
-	cli := client.NewListenHandler(clientMode)
+	cli := client.NewListenHandler(clientMode, clientServerAddr)
 	log.Fatal(gnet.Run(cli, fmt.Sprintf("tcp://:%d", clientPort), gnet.WithMulticore(clientMulticore)))
 }
 

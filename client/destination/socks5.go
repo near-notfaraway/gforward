@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/txthinking/socks5"
+	"log"
 	"net"
 	"slices"
 )
@@ -27,6 +28,7 @@ func NewSocks5Parser() *Socks5Parser {
 	}
 }
 
+// Parse 根据 Socks5 Request Address 来获取目的地
 // https://datatracker.ietf.org/doc/html/rfc1928 [SOCKS Protocol Version 5]
 func (p *Socks5Parser) Parse(conn gnet.Conn) (string, error) {
 	connState := p.getConnState(conn)
@@ -37,6 +39,7 @@ func (p *Socks5Parser) Parse(conn gnet.Conn) (string, error) {
 			return "", err
 		}
 		p.connMapState[conn] = connStateNegotiated
+		log.Printf("[client] conn %p sock5 state turn to: %d", conn, connStateNegotiated)
 		return "", nil
 
 	case connStateNegotiated:
@@ -46,9 +49,11 @@ func (p *Socks5Parser) Parse(conn gnet.Conn) (string, error) {
 			return "", err
 		}
 		p.connMapState[conn] = connStateConnected
+		log.Printf("[client] conn %p sock5 state turn to: %d", conn, connStateConnected)
 		return dest, nil
 
 	case connStateConnected:
+		log.Printf("[client] conn %p sock5 state aready is: %d", conn, connStateConnected)
 		return "", nil
 
 	default:
@@ -107,6 +112,11 @@ func (p *Socks5Parser) handleRequest(conn gnet.Conn) (string, error) {
 			return "", fmt.Errorf("%s, %w", errMsg, err)
 		}
 		return "", fmt.Errorf("invalid sock5 request cmd: %d", req.Cmd)
+	}
+
+	rp := socks5.NewReply(socks5.RepSuccess, req.Atyp, net.IPv4zero, []byte{0x00, 0x00})
+	if _, err := rp.WriteTo(conn); err != nil {
+		return "", fmt.Errorf("write socks5 resp to conn failed: %w", err)
 	}
 
 	return req.Address(), nil

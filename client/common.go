@@ -19,11 +19,13 @@ type ListenHandler struct {
 
 	internalProtocol protocol.InternalPacket
 	dialer           *dialer.Dialer
+	serverAddr       string
 }
 
-func NewListenHandler(mode string) *ListenHandler {
+func NewListenHandler(mode, serverAddr string) *ListenHandler {
 	return &ListenHandler{
 		destinationParser: destination.NewParser(destination.ParserProto(mode)),
+		serverAddr:        serverAddr,
 	}
 }
 
@@ -39,11 +41,8 @@ func (lh *ListenHandler) OnBoot(e gnet.Engine) (action gnet.Action) {
 }
 
 func (lh *ListenHandler) OnTraffic(c gnet.Conn) gnet.Action {
-	var destination string
 	dest, ok := lh.userConnMapDestination[c]
-	if ok {
-		destination = dest
-	} else {
+	if !ok {
 		dest_, err := lh.destinationParser.Parse(c)
 		if err != nil {
 			log.Printf("[client] destination parse failed: %s", err.Error())
@@ -52,16 +51,16 @@ func (lh *ListenHandler) OnTraffic(c gnet.Conn) gnet.Action {
 		if dest_ == "" {
 			return gnet.None
 		}
-		log.Printf("destination is: %s", dest_)
-		destination = dest_
-		lh.userConnMapDestination[c] = destination
+		log.Printf("[client] destination is: %s", dest_)
+		dest = dest_
+		lh.userConnMapDestination[c] = dest
 	}
 
 	var serverConn gnet.Conn
 	if sc, ok := lh.userConnMapServerConn[c]; ok {
 		serverConn = sc
 	} else {
-		sc_, err := lh.dialer.Dial("tcp", "127.0.0.1:9000")
+		sc_, err := lh.dialer.Dial("tcp", lh.serverAddr)
 		if err != nil {
 			panic(err)
 		}
@@ -78,8 +77,13 @@ func (lh *ListenHandler) OnTraffic(c gnet.Conn) gnet.Action {
 		log.Printf(fmt.Sprintf("[client] recv from user conn failed: %s", err))
 		return gnet.Close
 	}
+	if len(buf) == 0 {
+		log.Printf(fmt.Sprintf("[client] recv from user conn no data"))
+		return gnet.None
+	}
+	log.Printf(fmt.Sprintf("[client] recv from user conn %p: len %d", c, len(buf)))
 	pkt.SetPayload(buf)
-	pkt.SetDestination(destination)
+	pkt.SetDestination(dest)
 	outBuf, err := pkt.Marshal()
 	if err != nil {
 		panic(err)
@@ -89,6 +93,7 @@ func (lh *ListenHandler) OnTraffic(c gnet.Conn) gnet.Action {
 		log.Printf("[client] forward to server len: %d", len(outBuf))
 		return gnet.None
 	}
+	log.Printf(fmt.Sprintf("[client] forward to server conn %p: len %d", serverConn, len(buf)))
 
 	return gnet.None
 }

@@ -13,6 +13,7 @@ func NewHTTPParser() *HTTPParser {
 	return &HTTPParser{}
 }
 
+// Parse 根据 HTTP Host 来获取目的地
 func (p *HTTPParser) Parse(conn gnet.Conn) (string, error) {
 	bufReader := bufio.NewReader(conn)
 	httpReq, err := http.ReadRequest(bufReader)

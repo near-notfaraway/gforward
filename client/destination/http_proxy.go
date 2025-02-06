@@ -17,6 +17,7 @@ func NewHTTPProxyParser() *HTTPProxyParser {
 	return &HTTPProxyParser{}
 }
 
+// Parse 根据 HTTP Connect 请求的 Host 来获取目的地
 func (p *HTTPProxyParser) Parse(conn gnet.Conn) (string, error) {
 	bufReader := bufio.NewReader(conn)
 	httpReq, err := http.ReadRequest(bufReader)

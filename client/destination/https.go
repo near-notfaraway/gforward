@@ -22,7 +22,7 @@ func NewHTTPSParser() *HTTPSParser {
 	return &HTTPSParser{}
 }
 
-// ParseAndAck 根据 TLS 识别 SNI 来获取目的地
+// Parse 根据 TLS 识别 SNI 来获取目的地
 // https://datatracker.ietf.org/doc/html/rfc8446 [The Transport Layer Security (TLS) Protocol Version 1.3]
 // https://datatracker.ietf.org/doc/html/rfc6066 [Transport Layer Security (TLS) Extensions: Extension Definitions]
 func (p *HTTPSParser) Parse(conn gnet.Conn) (string, error) {

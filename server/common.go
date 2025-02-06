@@ -31,13 +31,13 @@ func (lh *ListenHandler) OnBoot(e gnet.Engine) (action gnet.Action) {
 
 func (lh *ListenHandler) OnTraffic(c gnet.Conn) gnet.Action {
 	buf, _ := c.Peek(-1)
-	log.Printf("[server] recv from client %p len: %d", c, len(buf))
 	pkt := lh.internalProtocol.New()
 	n, err := pkt.Unmarshal(buf)
 	if err != nil {
 		return gnet.None
 	}
 	_, _ = c.Discard(n)
+	log.Printf("[server] recv from client %p len: %d", c, n)
 	dest := pkt.GetDestination()
 	log.Printf("[server] recv destination from client conn %p : %s", c, dest)
 	userIdent := c.RemoteAddr().String() + dest
@@ -58,7 +58,7 @@ func (lh *ListenHandler) OnTraffic(c gnet.Conn) gnet.Action {
 
 	wn, err := dc.Write(pkt.GetPayload())
 	if err != nil {
-		log.Printf("[server]send to dest conn %p failed: %s", dc, err)
+		log.Printf("[server] send to dest conn %p failed: %s", dc, err)
 		return gnet.None
 	}
 	log.Printf("[server] send to dest conn %p: len %d", dc, wn)
