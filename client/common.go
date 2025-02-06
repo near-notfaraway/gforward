@@ -7,6 +7,7 @@ import (
 	"github.com/near-notfaraway/gtunnel/protocol"
 	"github.com/panjf2000/gnet/v2"
 	"log"
+	"strings"
 )
 
 type ListenHandler struct {
@@ -23,14 +24,19 @@ type ListenHandler struct {
 }
 
 func NewListenHandler(mode, serverAddr string) *ListenHandler {
+	var proto destination.ParserProto
+	if strings.HasSuffix(mode, "_dns") {
+		proto = destination.ParserProto(strings.TrimSuffix(mode, "_dns"))
+	} else {
+		proto = destination.ParserProto(mode)
+	}
 	return &ListenHandler{
-		destinationParser: destination.NewParser(destination.ParserProto(mode)),
+		destinationParser: destination.NewParser(proto),
 		serverAddr:        serverAddr,
 	}
 }
 
 func (lh *ListenHandler) OnBoot(e gnet.Engine) (action gnet.Action) {
-	lh.destinationParser = destination.NewParser(destination.ParserProtoSocks5)
 	lh.userConnMapDestination = make(map[gnet.Conn]string)
 	lh.userConnMapServerConn = make(map[gnet.Conn]gnet.Conn)
 	lh.serverConnMapUserConn = make(map[gnet.Conn]gnet.Conn)
@@ -64,7 +70,7 @@ func (lh *ListenHandler) OnTraffic(c gnet.Conn) gnet.Action {
 		if err != nil {
 			panic(err)
 		}
-		log.Printf("new server conn %s -> %s", sc_.LocalAddr().String(), sc_.RemoteAddr().String())
+		log.Printf("[client] new server conn %s -> %s", sc_.LocalAddr().String(), sc_.RemoteAddr().String())
 		lh.userConnMapServerConn[c] = sc_
 		lh.serverConnMapUserConn[sc_] = c
 		serverConn = sc_
@@ -72,7 +78,7 @@ func (lh *ListenHandler) OnTraffic(c gnet.Conn) gnet.Action {
 
 	// need forward though server conn
 	pkt := lh.internalProtocol.New()
-	buf, err := c.Peek(-1)
+	buf, err := c.Next(-1)
 	if err != nil {
 		log.Printf(fmt.Sprintf("[client] recv from user conn failed: %s", err))
 		return gnet.Close

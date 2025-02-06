@@ -6,9 +6,8 @@ import (
 )
 
 type Dialer struct {
-	handler   *DialHandler
-	client    *gnet.Client
-	readyChan chan gnet.Conn
+	handler *DialHandler
+	client  *gnet.Client
 }
 
 func NewDialer(caller, proto string) *Dialer {
@@ -22,9 +21,8 @@ func NewDialer(caller, proto string) *Dialer {
 		panic(fmt.Errorf("start dialer client failed: %w", err))
 	}
 	return &Dialer{
-		handler:   handler,
-		client:    client,
-		readyChan: make(chan gnet.Conn),
+		handler: handler,
+		client:  client,
 	}
 }
 

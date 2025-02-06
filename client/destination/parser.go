@@ -1,6 +1,7 @@
 package destination
 
 import (
+	"fmt"
 	"github.com/panjf2000/gnet/v2"
 )
 
@@ -28,6 +29,6 @@ func NewParser(proto ParserProto) Parser {
 	case ParserProtoSocks5:
 		return NewSocks5Parser()
 	default:
-		panic("invalid parser proto")
+		panic(fmt.Sprintf("invalid parser proto %s", proto))
 	}
 }

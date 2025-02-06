@@ -36,7 +36,7 @@ func (dh *DialHandler) OnTraffic(c gnet.Conn) gnet.Action {
 		log.Printf("[%s] dialer unmarshal buf from conn %p failed: %s", dh.caller, c, err)
 		return gnet.None
 	}
-	log.Printf("[%s] dialer read pkt from conn %p, len %d", dh.caller, c, n)
+	log.Printf("[%s] dialer read pkt from conn %p: len %d", dh.caller, c, n)
 	_, _ = c.Discard(n)
 
 	// 组装 RecvPkt 并且通过 recvChan 传至调用方

@@ -27,7 +27,7 @@ func NewHTTPSParser() *HTTPSParser {
 // https://datatracker.ietf.org/doc/html/rfc6066 [Transport Layer Security (TLS) Extensions: Extension Definitions]
 func (p *HTTPSParser) Parse(conn gnet.Conn) (string, error) {
 	// 校验是否为 TLS Handshake 的 Client Hello
-	buf, err := conn.Next(10)
+	buf, err := conn.Peek(9)
 	if err != nil {
 		return "", err
 	}
@@ -44,16 +44,17 @@ func (p *HTTPSParser) Parse(conn gnet.Conn) (string, error) {
 	// 读取 TLS Handshake 的 buf
 	hsLengthBuf := append([]byte{0}, buf[6:9]...)
 	hsLength := int(binary.BigEndian.Uint32(hsLengthBuf))
-	hsBuf, err := conn.Next(hsLength)
+	allBuf, err := conn.Peek(9 + hsLength)
+	hsBuf := allBuf[9:]
 	if len(hsBuf) != hsLength {
 		return "", fmt.Errorf("TLS Handshark Client Hello length invalid")
 	}
 
 	// 找到 extensions 的起始位置
-	sessionIdLen := int(hsBuf[33])
-	cipherSuitListLen := int(hsBuf[34+sessionIdLen])<<8 + int(hsBuf[35+sessionIdLen])
-	compressionMethodLen := int(hsBuf[46+sessionIdLen+cipherSuitListLen])
-	extensionsLenPos := 37 + sessionIdLen + cipherSuitListLen + compressionMethodLen
+	sessionIdLen := int(hsBuf[34])
+	cipherSuitListLen := int(hsBuf[35+sessionIdLen])<<8 + int(hsBuf[36+sessionIdLen])
+	compressionMethodLen := int(hsBuf[37+sessionIdLen+cipherSuitListLen])
+	extensionsLenPos := 38 + sessionIdLen + cipherSuitListLen + compressionMethodLen
 	extensionsLen := int(binary.BigEndian.Uint16(hsBuf[extensionsLenPos : extensionsLenPos+2]))
 	extensionsPos := extensionsLenPos + 2
 	if len(hsBuf[extensionsPos:]) != extensionsLen {
