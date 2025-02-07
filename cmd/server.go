@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"github.com/near-notfaraway/gtunnel/diagnosis"
 	"github.com/near-notfaraway/gtunnel/server"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/cobra"
@@ -29,6 +30,14 @@ func init() {
 }
 
 func serverRun(cmd *cobra.Command, args []string) {
+	if err := diagnosis.InitLogger(&diagnosis.LogConfig{
+		Level:   "debug",
+		Verbose: false,
+		Path:    diagnosis.StandOutPutPath,
+	}); err != nil {
+		panic(fmt.Sprintf("init logger failed: %s", err))
+	}
+
 	srv := server.NewListenHandler()
 	log.Fatal(gnet.Run(srv, fmt.Sprintf("tcp://:%d", serverPort), gnet.WithMulticore(serverMulticore)))
 }

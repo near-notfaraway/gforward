@@ -3,6 +3,7 @@ package dialer
 import (
 	"fmt"
 	"github.com/panjf2000/gnet/v2"
+	"github.com/sirupsen/logrus"
 )
 
 type Dialer struct {
@@ -10,8 +11,8 @@ type Dialer struct {
 	client  *gnet.Client
 }
 
-func NewDialer(caller, proto string) *Dialer {
-	handler := NewDialHandler(caller, proto)
+func NewDialer(proto string, logger *logrus.Entry) *Dialer {
+	handler := NewDialHandler(proto, logger)
 	client, err := gnet.NewClient(handler)
 	if err != nil {
 		panic(fmt.Errorf("create dialer client failed: %w", err))

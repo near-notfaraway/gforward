@@ -3,65 +3,89 @@ package server
 import (
 	"github.com/near-notfaraway/gtunnel/dialer"
 	"github.com/near-notfaraway/gtunnel/protocol"
+	"github.com/near-notfaraway/gtunnel/utils"
 	"github.com/panjf2000/gnet/v2"
-	"log"
+	"github.com/sirupsen/logrus"
 )
 
 type ListenHandler struct {
 	gnet.BuiltinEventEngine
 
-	userIdentMapDestConn  map[string]gnet.Conn
-	destConnMapClientConn map[gnet.Conn]gnet.Conn
-	internalProtocol      protocol.InternalPacket
-	dialer                *dialer.Dialer
+	destConnIdxMapDestConn map[string]gnet.Conn
+	destConnMapClientConn  map[gnet.Conn]gnet.Conn
+	internalProtocol       protocol.InternalPacket
+	dialer                 *dialer.Dialer
+	uploadLogger           *logrus.Entry
+	downloadLogger         *logrus.Entry
 }
 
 func NewListenHandler() *ListenHandler {
-	return &ListenHandler{}
+	return &ListenHandler{
+		uploadLogger: logrus.WithFields(logrus.Fields{
+			"role":      "server",
+			"direction": "client->dest",
+		}),
+		downloadLogger: logrus.WithFields(logrus.Fields{
+			"role":      "server",
+			"direction": "dest->client",
+		}),
+	}
 }
 
 func (lh *ListenHandler) OnBoot(e gnet.Engine) (action gnet.Action) {
-	lh.userIdentMapDestConn = make(map[string]gnet.Conn)
+	lh.destConnIdxMapDestConn = make(map[string]gnet.Conn)
 	lh.destConnMapClientConn = make(map[gnet.Conn]gnet.Conn)
 	lh.internalProtocol = &protocol.ForwardPacket{}
-	lh.dialer = dialer.NewDialer("server", protocol.PacketTypePlain)
+	lh.dialer = dialer.NewDialer(protocol.PacketTypePlain, lh.downloadLogger)
 	lh.RecvFromDialer()
 	return gnet.None
 }
 
-func (lh *ListenHandler) OnTraffic(c gnet.Conn) gnet.Action {
-	buf, _ := c.Peek(-1)
+func (lh *ListenHandler) OnTraffic(conn gnet.Conn) gnet.Action {
+	connStr := utils.FormatGNetConn(conn)
+	logger := lh.uploadLogger.WithField("fromConn", connStr)
+
+	// 读取 pkt
+	buf, _ := conn.Peek(-1)
+	logger.Debugf("read buffer: len %d", len(buf))
 	pkt := lh.internalProtocol.New()
 	n, err := pkt.Unmarshal(buf)
 	if err != nil {
+		logger.Errorf("unmarshal packet failed: %s", err)
 		return gnet.None
 	}
-	_, _ = c.Discard(n)
-	log.Printf("[server] recv from client %p len: %d", c, n)
+	_, _ = conn.Discard(n)
+	logger.Debugf("unmarshal packet: len %d", n)
+
+	// 根据 client conn 和 dest 查找或新建 dest conn
 	dest := pkt.GetDestination()
-	log.Printf("[server] recv destination from client conn %p : %s", c, dest)
-	userIdent := c.RemoteAddr().String() + dest
-	var dc gnet.Conn
-	if _dc, ok := lh.userIdentMapDestConn[userIdent]; ok {
-		dc = _dc
-	} else {
-		dl, err := lh.dialer.Dial("tcp", dest)
+	logger.Debugf("packet dest: %s", dest)
+	destConnIdx := connStr + dest
+	destConn, ok := lh.destConnIdxMapDestConn[destConnIdx]
+	if !ok {
+		newDestConn, err := lh.dialer.Dial("tcp", dest)
 		if err != nil {
-			log.Printf("[server] dail destination failed: %s", err)
+			logger.Errorf("dail dest failed: %s", err)
 			return gnet.None
 		}
-		log.Printf("[server] new dial destination: %s -> %s", dl.LocalAddr().String(), dl.RemoteAddr().String())
-		lh.userIdentMapDestConn[userIdent] = dl
-		lh.destConnMapClientConn[dl] = c
-		dc = dl
+		logger.Debugf("new dest conn: %s", utils.FormatGNetConn(newDestConn))
+		lh.destConnIdxMapDestConn[destConnIdx] = newDestConn
+		lh.destConnMapClientConn[newDestConn] = conn
+		destConn = newDestConn
 	}
+	logger = logger.WithField("toConn", utils.FormatGNetConn(destConn))
 
-	wn, err := dc.Write(pkt.GetPayload())
+	// 发送 pkt payload 到 dest
+	logger.Debugf("packet payload: len %d", len(pkt.GetPayload()))
+	wn, err := destConn.Write(pkt.GetPayload())
 	if err != nil {
-		log.Printf("[server] send to dest conn %p failed: %s", dc, err)
+		logger.Errorf("write payload failed: %s", err)
 		return gnet.None
 	}
-	log.Printf("[server] send to dest conn %p: len %d", dc, wn)
+	if wn != len(pkt.GetPayload()) {
+		logger.Errorf("write payload not complete: actural len %d", wn)
+	}
+	logger.Debugf("write payload success: len %d", wn)
 
 	return gnet.None
 }
@@ -71,18 +95,26 @@ func (lh *ListenHandler) RecvFromDialer() {
 		for {
 			select {
 			case pkt := <-lh.dialer.RecvChan():
-				cc, ok := lh.destConnMapClientConn[pkt.Conn]
+				// 根据 dest conn 查找 client conn
+				logger := lh.downloadLogger.WithField("fromConn", utils.FormatGNetConn(pkt.Conn))
+				clientConn, ok := lh.destConnMapClientConn[pkt.Conn]
 				if !ok {
-					log.Printf("failed to lookup client conn by dest conn %p", pkt.Conn)
+					logger.Errorf("lookup client conn by dest conn failed")
 					continue
 				}
-				log.Printf("success lookup client conn %p by dest conn %p", cc, pkt.Conn)
-				n, err := cc.Write(pkt.Pkt.GetPayload())
-				if err != nil || n != len(pkt.Pkt.GetPayload()) {
-					log.Printf("[server] send to client conn %p failed: %s", cc, err)
+				logger = logger.WithField("toConn", utils.FormatGNetConn(clientConn))
+
+				// 发送 packet payload 到 client conn
+				logger.Debugf("packet payload len: %d", len(pkt.Pkt.GetPayload()))
+				wn, err := clientConn.Write(pkt.Pkt.GetPayload())
+				if err != nil {
+					logger.Errorf("write payload failed: %s", err)
 					continue
 				}
-				log.Printf("[server] send to client: len %d", len(pkt.Pkt.GetPayload()))
+				if wn != len(pkt.Pkt.GetPayload()) {
+					logger.Errorf("write payload not complete: actural len %d", wn)
+				}
+				logger.Debugf("write payload success: len %d", wn)
 			}
 		}
 	}()

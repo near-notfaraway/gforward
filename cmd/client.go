@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"github.com/near-notfaraway/gtunnel/client"
+	"github.com/near-notfaraway/gtunnel/diagnosis"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/cobra"
 	"log"
@@ -56,6 +57,14 @@ func clientRun(cmd *cobra.Command, args []string) {
 		}
 	default:
 		log.Fatalf("invalid client mode %s", clientMode)
+	}
+
+	if err := diagnosis.InitLogger(&diagnosis.LogConfig{
+		Level:   "debug",
+		Verbose: false,
+		Path:    diagnosis.StandOutPutPath,
+	}); err != nil {
+		panic(fmt.Sprintf("init logger failed: %s", err))
 	}
 
 	cli := client.NewListenHandler(clientMode, clientServerAddr)
