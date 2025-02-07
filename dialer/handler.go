@@ -41,7 +41,7 @@ func (dh *DialHandler) OnTraffic(conn gnet.Conn) gnet.Action {
 		return gnet.None
 	}
 	_, _ = conn.Discard(n)
-	logger.Debugf("marshal packet: len %d", n)
+	logger.Debugf("unmarshal packet: len %d", n)
 
 	// 组装 RecvPkt 并且通过 recvChan 传至调用方
 	dh.recvChan <- &RecvPkt{

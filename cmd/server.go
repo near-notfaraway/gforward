@@ -12,6 +12,7 @@ import (
 var serverCmd *cobra.Command
 var serverPort int
 var serverMulticore bool
+var serverVerbose bool
 
 func init() {
 	serverCmd = &cobra.Command{
@@ -25,13 +26,19 @@ func init() {
 
 	serverCmd.Flags().IntVarP(&serverPort, "port", "p",
 		9989, "listen port")
-	serverCmd.Flags().BoolVar(&clientMulticore, "multicore",
+	serverCmd.Flags().BoolVar(&serverMulticore, "multicore",
 		true, "run with multicore")
+	serverCmd.Flags().BoolVar(&serverVerbose, "verbose",
+		false, "log more information")
 }
 
 func serverRun(cmd *cobra.Command, args []string) {
+	logLevel := "warn"
+	if serverVerbose {
+		logLevel = "debug"
+	}
 	if err := diagnosis.InitLogger(&diagnosis.LogConfig{
-		Level:   "debug",
+		Level:   logLevel,
 		Verbose: false,
 		Path:    diagnosis.StandOutPutPath,
 	}); err != nil {

@@ -21,6 +21,7 @@ var clientMode string
 var clientPort int
 var clientMulticore bool
 var clientServerAddr string
+var clientVerbose bool
 
 func init() {
 	clientCmd = &cobra.Command{
@@ -39,6 +40,8 @@ func init() {
 		"127.0.0.1:9989", "addr of server")
 	clientCmd.Flags().BoolVar(&clientMulticore, "multicore",
 		true, "run with multicore")
+	clientCmd.Flags().BoolVarP(&clientVerbose, "verbose", "v",
+		false, "log more information")
 }
 
 func clientRun(cmd *cobra.Command, args []string) {
@@ -59,8 +62,12 @@ func clientRun(cmd *cobra.Command, args []string) {
 		log.Fatalf("invalid client mode %s", clientMode)
 	}
 
+	logLevel := "warn"
+	if clientVerbose {
+		logLevel = "debug"
+	}
 	if err := diagnosis.InitLogger(&diagnosis.LogConfig{
-		Level:   "debug",
+		Level:   logLevel,
 		Verbose: false,
 		Path:    diagnosis.StandOutPutPath,
 	}); err != nil {
