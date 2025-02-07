@@ -26,9 +26,8 @@ func (p *HTTPProxyParser) Parse(conn gnet.Conn) (string, error) {
 	}
 
 	// 非 Connect 方法则相当于走 HTTP 透明代理，不需要返回 ACK
-	dest := extractDestWithPort(httpReq.Host, 80)
 	if httpReq.Method != http.MethodConnect {
-		return dest, nil
+		return "", fmt.Errorf("invalid http method: %s", httpReq.Method)
 	}
 
 	// Connect 方法需要返回 ACK
@@ -37,5 +36,5 @@ func (p *HTTPProxyParser) Parse(conn gnet.Conn) (string, error) {
 		return "", err
 	}
 
-	return dest, nil
+	return extractDestWithPort(httpReq.Host, 80), nil
 }
