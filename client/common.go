@@ -7,17 +7,17 @@ import (
 	"github.com/near-notfaraway/gtunnel/utils"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/sirupsen/logrus"
-	"log"
 	"strings"
+	"sync"
 )
 
 type ListenHandler struct {
 	gnet.BuiltinEventEngine
 
 	destinationParser      destination.Parser
-	userConnMapDestination map[gnet.Conn]string
-	userConnMapServerConn  map[gnet.Conn]gnet.Conn
-	serverConnMapUserConn  map[gnet.Conn]gnet.Conn
+	userConnMapDestination sync.Map
+	userConnMapServerConn  sync.Map
+	serverConnMapUserConn  sync.Map
 
 	internalProtocol protocol.InternalPacket
 	dialer           *dialer.Dialer
@@ -48,9 +48,6 @@ func NewListenHandler(mode, serverAddr string) *ListenHandler {
 }
 
 func (lh *ListenHandler) OnBoot(e gnet.Engine) (action gnet.Action) {
-	lh.userConnMapDestination = make(map[gnet.Conn]string)
-	lh.userConnMapServerConn = make(map[gnet.Conn]gnet.Conn)
-	lh.serverConnMapUserConn = make(map[gnet.Conn]gnet.Conn)
 	lh.internalProtocol = &protocol.ForwardPacket{}
 	lh.dialer = dialer.NewDialer(protocol.PacketTypePlain, lh.downloadLogger)
 	lh.RecvFromDialer()
@@ -61,7 +58,7 @@ func (lh *ListenHandler) OnTraffic(conn gnet.Conn) gnet.Action {
 	logger := lh.uploadLogger.WithField("fromConn", utils.FormatGNetConn(conn))
 
 	// 根据 user conn 获取 dest
-	dest, ok := lh.userConnMapDestination[conn]
+	destVal, ok := lh.userConnMapDestination.Load(conn)
 	if !ok {
 		newDest, err := lh.destinationParser.Parse(conn)
 		if err != nil {
@@ -73,13 +70,14 @@ func (lh *ListenHandler) OnTraffic(conn gnet.Conn) gnet.Action {
 			return gnet.None
 		}
 		logger.Debugf("parse new dest: %s", newDest)
-		lh.userConnMapDestination[conn] = newDest
-		dest = newDest
+		lh.userConnMapDestination.Store(conn, newDest)
+		destVal = newDest
 	}
+	dest := destVal.(string)
 	logger.Debugf("the dest: %s", dest)
 
 	// 根据 user conn 获取 server conn
-	serverConn, ok := lh.userConnMapServerConn[conn]
+	serverConnVal, ok := lh.userConnMapServerConn.Load(conn)
 	if !ok {
 		newServerConn, err := lh.dialer.Dial("tcp", lh.serverAddr)
 		if err != nil {
@@ -87,10 +85,11 @@ func (lh *ListenHandler) OnTraffic(conn gnet.Conn) gnet.Action {
 			return gnet.Close
 		}
 		logger.Debugf("new server conn: %s", utils.FormatGNetConn(newServerConn))
-		lh.userConnMapServerConn[conn] = newServerConn
-		lh.serverConnMapUserConn[newServerConn] = conn
-		serverConn = newServerConn
+		lh.userConnMapServerConn.Store(conn, newServerConn)
+		lh.serverConnMapUserConn.Store(newServerConn, conn)
+		serverConnVal = newServerConn
 	}
+	serverConn := serverConnVal.(gnet.Conn)
 	logger = logger.WithField("fromConn", utils.FormatGNetConn(serverConn))
 
 	// 组装用于发送的 packet
@@ -128,13 +127,17 @@ func (lh *ListenHandler) OnTraffic(conn gnet.Conn) gnet.Action {
 	return gnet.None
 }
 
-func (lh *ListenHandler) OnClose(c gnet.Conn, err error) (action gnet.Action) {
-	log.Printf("close user conn %p, err: %s", c, err)
-	delete(lh.userConnMapDestination, c)
-	sc, ok := lh.userConnMapServerConn[c]
+func (lh *ListenHandler) OnClose(conn gnet.Conn, err error) (action gnet.Action) {
+	connStr := utils.FormatGNetConn(conn)
+	logger := lh.uploadLogger.WithField("fromConn", connStr)
+	logger.Debugf("closed conn by err: %s", err)
+
+	lh.userConnMapDestination.Delete(conn)
+	scVal, ok := lh.userConnMapServerConn.Load(conn)
 	if ok {
-		delete(lh.userConnMapServerConn, c)
-		delete(lh.serverConnMapUserConn, sc)
+		sc := scVal.(gnet.Conn)
+		lh.userConnMapServerConn.Delete(conn)
+		lh.serverConnMapUserConn.Delete(sc)
 	}
 	return
 }
@@ -146,11 +149,12 @@ func (lh *ListenHandler) RecvFromDialer() {
 			case pkt := <-lh.dialer.RecvChan():
 				logger := lh.downloadLogger.WithField("fromConn", utils.FormatGNetConn(pkt.Conn))
 				// 根据 server conn 查找 user conn
-				userConn, ok := lh.serverConnMapUserConn[pkt.Conn]
+				userConnVal, ok := lh.serverConnMapUserConn.Load(pkt.Conn)
 				if !ok {
 					logger.Errorf("lookup user conn by server conn failed")
 					continue
 				}
+				userConn := userConnVal.(gnet.Conn)
 				logger = logger.WithField("toConn", utils.FormatGNetConn(userConn))
 
 				// 发送 packet payload 到 user conn

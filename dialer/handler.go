@@ -8,8 +8,9 @@ import (
 )
 
 type RecvPkt struct {
-	Conn gnet.Conn
-	Pkt  protocol.InternalPacket
+	Conn   gnet.Conn
+	Pkt    protocol.InternalPacket
+	Logger *logrus.Entry
 }
 
 type DialHandler struct {
@@ -45,8 +46,9 @@ func (dh *DialHandler) OnTraffic(conn gnet.Conn) gnet.Action {
 
 	// 组装 RecvPkt 并且通过 recvChan 传至调用方
 	dh.recvChan <- &RecvPkt{
-		Conn: conn,
-		Pkt:  pkt,
+		Conn:   conn,
+		Pkt:    pkt,
+		Logger: logger,
 	}
 	return gnet.None
 }

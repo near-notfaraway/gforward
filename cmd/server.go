@@ -7,6 +7,7 @@ import (
 	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/cobra"
 	"log"
+	"runtime"
 )
 
 var serverCmd *cobra.Command
@@ -28,7 +29,7 @@ func init() {
 		9989, "listen port")
 	serverCmd.Flags().BoolVar(&serverMulticore, "multicore",
 		true, "run with multicore")
-	serverCmd.Flags().BoolVar(&serverVerbose, "verbose",
+	serverCmd.Flags().BoolVarP(&serverVerbose, "verbose", "v",
 		false, "log more information")
 }
 
@@ -44,7 +45,11 @@ func serverRun(cmd *cobra.Command, args []string) {
 	}); err != nil {
 		panic(fmt.Sprintf("init logger failed: %s", err))
 	}
+	handlerNum := 1
+	if serverMulticore {
+		handlerNum = runtime.NumCPU()
+	}
 
-	srv := server.NewListenHandler()
+	srv := server.NewDispatcher(handlerNum)
 	log.Fatal(gnet.Run(srv, fmt.Sprintf("tcp://:%d", serverPort), gnet.WithMulticore(serverMulticore)))
 }
