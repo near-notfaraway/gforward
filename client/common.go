@@ -100,7 +100,6 @@ func (lh *ListenHandler) OnTraffic(conn gnet.Conn) gnet.Action {
 		return gnet.Close
 	}
 	if len(buf) == 0 {
-		logger.Warnf("read empty buffer")
 		return gnet.None
 	}
 	logger.Debugf("read buffer: len %d", len(buf))

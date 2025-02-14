@@ -95,5 +95,6 @@ func (d *Dispatcher) OnTraffic(conn gnet.Conn) gnet.Action {
 	}
 	d.channels[chanIdx] <- msg
 	logger.Debugf("dispatch packet to chan %d", chanIdx)
+
 	return gnet.None
 }

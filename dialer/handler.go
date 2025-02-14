@@ -50,5 +50,6 @@ func (dh *DialHandler) OnTraffic(conn gnet.Conn) gnet.Action {
 		Pkt:    pkt,
 		Logger: logger,
 	}
+
 	return gnet.None
 }
