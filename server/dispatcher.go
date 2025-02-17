@@ -38,12 +38,12 @@ func NewDispatcher(handlerNum int) *Dispatcher {
 	channels := make([]chan *DispatchMsg, handlerNum)
 	handlers := make([]*MsgHandler, handlerNum)
 	for i := range channels {
-		ch := make(chan *DispatchMsg)
+		ch := make(chan *DispatchMsg, 20)
 		dl := dialer.NewDialer(protocol.PacketTypePlain, downloadLogger)
 		hdl := NewMsgHandler(dl, ch)
 		channels[i] = ch
 		handlers[i] = hdl
-		go hdl.Start()
+		hdl.Start()
 	}
 
 	return &Dispatcher{

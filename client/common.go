@@ -90,7 +90,7 @@ func (lh *ListenHandler) OnTraffic(conn gnet.Conn) gnet.Action {
 		serverConnVal = newServerConn
 	}
 	serverConn := serverConnVal.(gnet.Conn)
-	logger = logger.WithField("fromConn", utils.FormatGNetConn(serverConn))
+	logger = logger.WithField("toConn", utils.FormatGNetConn(serverConn))
 
 	// 组装用于发送的 packet
 	pkt := lh.internalProtocol.New()

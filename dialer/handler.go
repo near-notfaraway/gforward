@@ -25,7 +25,7 @@ func NewDialHandler(proto string, logger *logrus.Entry) *DialHandler {
 	return &DialHandler{
 		logger:       logger,
 		recvProtocol: protocol.NewInternalPacket(proto),
-		recvChan:     make(chan *RecvPkt),
+		recvChan:     make(chan *RecvPkt, 20),
 	}
 }
 
