@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"slices"
+	"sync"
 )
 
 type ConnState int
@@ -19,13 +20,11 @@ const (
 )
 
 type Socks5Parser struct {
-	connMapState map[gnet.Conn]ConnState
+	connMapState sync.Map // map[gnet.Conn]ConnState
 }
 
 func NewSocks5Parser() *Socks5Parser {
-	return &Socks5Parser{
-		connMapState: make(map[gnet.Conn]ConnState),
-	}
+	return &Socks5Parser{}
 }
 
 // Parse 根据 Socks5 Request Address 来获取目的地
@@ -35,20 +34,20 @@ func (p *Socks5Parser) Parse(conn gnet.Conn) (string, error) {
 	switch connState {
 	case connStateInit:
 		if err := p.handleNegotiationRequest(conn); err != nil {
-			delete(p.connMapState, conn)
+			p.connMapState.Delete(conn)
 			return "", err
 		}
-		p.connMapState[conn] = connStateNegotiated
+		p.connMapState.Store(conn, connStateNegotiated)
 		log.Printf("[client] conn %p sock5 state turn to: %d", conn, connStateNegotiated)
 		return "", nil
 
 	case connStateNegotiated:
 		dest, err := p.handleRequest(conn)
 		if err != nil {
-			delete(p.connMapState, conn)
+			p.connMapState.Delete(conn)
 			return "", err
 		}
-		p.connMapState[conn] = connStateConnected
+		p.connMapState.Store(conn, connStateConnected)
 		log.Printf("[client] conn %p sock5 state turn to: %d", conn, connStateConnected)
 		return dest, nil
 
@@ -62,10 +61,10 @@ func (p *Socks5Parser) Parse(conn gnet.Conn) (string, error) {
 }
 
 func (p *Socks5Parser) getConnState(conn gnet.Conn) ConnState {
-	if state, ok := p.connMapState[conn]; ok {
-		return state
+	if state, ok := p.connMapState.Load(conn); ok {
+		return state.(ConnState)
 	} else {
-		p.connMapState[conn] = connStateInit
+		p.connMapState.Store(conn, connStateInit)
 		return connStateInit
 	}
 }

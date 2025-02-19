@@ -94,7 +94,7 @@ func (lh *ListenHandler) OnTraffic(conn gnet.Conn) gnet.Action {
 
 	// 组装用于发送的 packet
 	pkt := lh.internalProtocol.New()
-	buf, err := conn.Next(-1)
+	buf, err := conn.Peek(-1)
 	if err != nil {
 		logger.Errorf("read buffer failed: %s", err)
 		return gnet.Close
@@ -102,6 +102,10 @@ func (lh *ListenHandler) OnTraffic(conn gnet.Conn) gnet.Action {
 	if len(buf) == 0 {
 		return gnet.None
 	}
+	if len(buf) > 65535 {
+		buf = buf[:65535]
+	}
+	_, _ = conn.Discard(len(buf))
 	logger.Debugf("read buffer: len %d", len(buf))
 	pkt.SetPayload(buf)
 	pkt.SetDestination(dest)
