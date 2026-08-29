@@ -12,13 +12,14 @@ import (
 const StandOutPutPath = "stdout"
 
 type LogConfig struct {
-	Level            string // log level
-	Verbose          bool   // includes log caller information
-	Path             string // log file path
-	MaxAgeHour       int    // max age for clean up expired log
-	RotationTimeHour int    // time interval of rotating log
+	Level            string // 日志级别
+	Verbose          bool   // 是否记录调用位置
+	Path             string // 日志输出路径
+	MaxAgeHour       int    // 日志文件最大保留时长
+	RotationTimeHour int    // 日志文件轮转周期
 }
 
+// InitLogger 根据配置初始化日志级别、输出位置、轮转策略和格式。
 func InitLogger(conf *LogConfig) error {
 	// parse conf
 	var writer io.Writer

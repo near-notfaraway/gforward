@@ -1,7 +1,7 @@
 package protocol
 
 type PlainPacket struct {
-	payload []byte
+	payload []byte // 不带协议头的原始负载
 }
 
 func (p *PlainPacket) New() InternalPacket {

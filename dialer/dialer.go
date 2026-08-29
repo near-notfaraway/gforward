@@ -9,8 +9,8 @@ import (
 )
 
 type Dialer struct {
-	handler *DialHandler
-	client  *gnet.Client
+	handler *DialHandler // 处理出站连接收到的数据
+	client  *gnet.Client // 管理 gnet 出站连接和拨号
 }
 
 func NewDialer(proto string, logger *logrus.Entry) *Dialer {

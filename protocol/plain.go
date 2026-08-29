@@ -6,8 +6,8 @@ import (
 )
 
 type ForwardPacket struct {
-	destination string
-	payload     []byte
+	destination string // 目标主机和端口
+	payload     []byte // 需要转发的原始负载
 }
 
 func (p *ForwardPacket) New() InternalPacket {
@@ -27,6 +27,7 @@ func (p *ForwardPacket) Marshal() ([]byte, error) {
 	return buf, nil
 }
 
+// Unmarshal 从缓冲区解析一帧目标地址和负载，并返回实际消费的字节数。
 func (p *ForwardPacket) Unmarshal(buf []byte) (int, error) {
 	if len(buf) < 4 {
 		return 0, fmt.Errorf("packet too short")

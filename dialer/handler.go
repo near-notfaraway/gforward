@@ -8,17 +8,17 @@ import (
 )
 
 type RecvPkt struct {
-	Conn   gnet.Conn
-	Pkt    protocol.InternalPacket
-	Logger *logrus.Entry
+	Conn   gnet.Conn               // 接收到数据的出站连接
+	Pkt    protocol.InternalPacket // 从连接数据解析出的内部协议包
+	Logger *logrus.Entry           // 携带连接上下文的日志实例
 }
 
 type DialHandler struct {
-	gnet.BuiltinEventEngine
+	gnet.BuiltinEventEngine // 提供未覆盖事件的默认实现
 
-	logger       *logrus.Entry
-	recvProtocol protocol.InternalPacket
-	recvChan     chan *RecvPkt
+	logger       *logrus.Entry           // 出站连接流量日志
+	recvProtocol protocol.InternalPacket // 解码接收流量的协议原型
+	recvChan     chan *RecvPkt           // 向 Dialer 调用方投递解析结果
 }
 
 func NewDialHandler(proto string, logger *logrus.Entry) *DialHandler {
@@ -29,6 +29,7 @@ func NewDialHandler(proto string, logger *logrus.Entry) *DialHandler {
 	}
 }
 
+// OnTraffic 将连接缓冲区反序列化为内部包，并投递给 Dialer 调用方。
 func (dh *DialHandler) OnTraffic(conn gnet.Conn) gnet.Action {
 	logger := dh.logger.WithField("fromConn", utils.FormatGNetConn(conn))
 
