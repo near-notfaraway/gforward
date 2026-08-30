@@ -9,7 +9,7 @@ import (
 
 type RecvPkt struct {
 	Conn   gnet.Conn               // 接收到数据的出站连接
-	Pkt    protocol.InternalPacket // 从连接数据解析出的内部协议包
+	Pkt    protocol.InternalPacket // 从连接数据解析出的内部协议包，nil 表示连接关闭
 	Logger *logrus.Entry           // 携带连接上下文的日志实例
 }
 
@@ -27,6 +27,16 @@ func NewDialHandler(proto string, logger *logrus.Entry) *DialHandler {
 		recvProtocol: protocol.NewInternalPacket(proto),
 		recvChan:     make(chan *RecvPkt, 20),
 	}
+}
+
+func (dh *DialHandler) OnClose(conn gnet.Conn, err error) gnet.Action {
+	logger := dh.logger.WithField("fromConn", utils.FormatGNetConn(conn))
+	logger.Debugf("closed conn by err: %v", err)
+	dh.recvChan <- &RecvPkt{
+		Conn:   conn,
+		Logger: logger,
+	}
+	return gnet.None
 }
 
 // OnTraffic 将连接缓冲区反序列化为内部包，并投递给 Dialer 调用方。

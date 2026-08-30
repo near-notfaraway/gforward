@@ -163,40 +163,59 @@ func (lh *ListenHandler) OnClose(conn gnet.Conn, err error) (action gnet.Action)
 		cleaner.Clear(conn)
 	}
 	lh.userConnMapDestination.Delete(conn)
-	scVal, ok := lh.userConnMapServerConn.Load(conn)
+	scVal, ok := lh.userConnMapServerConn.LoadAndDelete(conn)
 	if ok {
 		sc := scVal.(gnet.Conn)
-		lh.userConnMapServerConn.Delete(conn)
-		lh.serverConnMapUserConn.Delete(sc)
+		lh.serverConnMapUserConn.CompareAndDelete(sc, conn)
+		_ = sc.Close()
 	}
 	return
+}
+
+// handleServerPacket 处理服务端数据或关闭事件，并维护双向连接映射。
+func (lh *ListenHandler) handleServerPacket(pkt *dialer.RecvPkt) {
+	logger := lh.downloadLogger.WithField("fromConn", utils.FormatGNetConn(pkt.Conn))
+	if pkt.Pkt == nil {
+		userConnVal, ok := lh.serverConnMapUserConn.LoadAndDelete(pkt.Conn)
+		if !ok {
+			logger.Debug("server conn route already removed")
+			return
+		}
+		userConn := userConnVal.(gnet.Conn)
+		if !lh.userConnMapServerConn.CompareAndDelete(userConn, pkt.Conn) {
+			logger.Debug("server conn route has been replaced")
+			return
+		}
+		_ = userConn.Close()
+		logger.Debug("removed route for closed server connection")
+		return
+	}
+
+	userConnVal, ok := lh.serverConnMapUserConn.Load(pkt.Conn)
+	if !ok {
+		logger.Debug("drop packet for closed user connection")
+		return
+	}
+	userConn := userConnVal.(gnet.Conn)
+	logger = logger.WithField("toConn", utils.FormatGNetConn(userConn))
+
+	logger.Debugf("packet payload len: %d", len(pkt.Pkt.GetPayload()))
+	wn, err := userConn.Write(pkt.Pkt.GetPayload())
+	if err != nil {
+		logger.Errorf("write payload failed: %s", err)
+		return
+	}
+	if wn != len(pkt.Pkt.GetPayload()) {
+		logger.Errorf("write payload not complete: actural len %d", wn)
+	}
+	logger.Debugf("write payload success: len %d", wn)
 }
 
 // RecvFromDialer 持续接收服务端响应，并根据连接映射写回对应用户连接。
 func (lh *ListenHandler) RecvFromDialer() {
 	go func() {
 		for pkt := range lh.dialer.RecvChan() {
-			logger := lh.downloadLogger.WithField("fromConn", utils.FormatGNetConn(pkt.Conn))
-			// 根据 server conn 查找 user conn
-			userConnVal, ok := lh.serverConnMapUserConn.Load(pkt.Conn)
-			if !ok {
-				logger.Errorf("lookup user conn by server conn failed")
-				continue
-			}
-			userConn := userConnVal.(gnet.Conn)
-			logger = logger.WithField("toConn", utils.FormatGNetConn(userConn))
-
-			// 发送 packet payload 到 user conn
-			logger.Debugf("packet payload len: %d", len(pkt.Pkt.GetPayload()))
-			wn, err := userConn.Write(pkt.Pkt.GetPayload())
-			if err != nil {
-				logger.Errorf("write payload failed: %s", err)
-				continue
-			}
-			if wn != len(pkt.Pkt.GetPayload()) {
-				logger.Errorf("write payload not complete: actural len %d", wn)
-			}
-			logger.Debugf("write payload success: len %d", wn)
+			lh.handleServerPacket(pkt)
 		}
 	}()
 }

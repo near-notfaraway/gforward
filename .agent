@@ -180,6 +180,8 @@ SYSTEM=linux bash build.sh
 - 结构体定义后连续放置其构造函数和方法组，不要在结构体与其方法之间穿插其他结构体定义，保证代码审查时可连续阅读。
 - 定义结构体时必须为每个字段添加简短注释，说明该字段的用途或所维护的状态。
 - 函数体超过 20 行时，必须在函数定义前添加一行简短注释，说明该函数的主要职责。
+- UT 单测统一基于 GoConvey 和 Mockey 实现。
+- 每个被测函数尽量由一个顶层 UT 函数覆盖，不同场景通过多层嵌套 `Convey` 或 `PatchConvey` 组织。
 - 新增接入协议：在 `client/destination` 实现 `Parser`，并在 `NewParser` 和 `cmd/client.go` 注册模式。短包必须返回 `ParseNeedMoreData`，协议错误返回 `ParseRejected`，只有目标地址完整时才能返回 `ParseDone`。
 - 修改隧道帧格式：同步修改 `protocol.ForwardPacket` 的 Marshal/Unmarshal，并重点验证 TCP 半包、粘包和最大长度。
 - 修改连接生命周期：同时检查客户端的三组连接映射和服务端的两组连接映射，确保双向关闭与清理对称。
