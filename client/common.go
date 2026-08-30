@@ -138,15 +138,10 @@ func (lh *ListenHandler) OnTraffic(conn gnet.Conn) gnet.Action {
 		packetLogger.Debugf("marshal packet: len %d", len(pktBuf))
 
 		// 发送 packet 到 server conn
-		wn, err := serverConn.Write(pktBuf)
-		if err != nil {
-			packetLogger.Errorf("write packet failed: %s", err)
+		packetLogger.Debugf("write packet: len %d", len(pktBuf))
+		if err = utils.AsyncWrite(serverConn, pktBuf, packetLogger, nil); err != nil {
 			return gnet.None
 		}
-		if wn != len(pktBuf) {
-			packetLogger.Errorf("write packet not complete: actural len %d", wn)
-		}
-		packetLogger.Debugf("write packet success: len %d", wn)
 
 		if conn.InboundBuffered() == 0 {
 			return gnet.None
@@ -199,16 +194,9 @@ func (lh *ListenHandler) handleServerPacket(pkt *dialer.RecvPkt) {
 	userConn := userConnVal.(gnet.Conn)
 	logger = logger.WithField("toConn", utils.FormatGNetConn(userConn))
 
-	logger.Debugf("packet payload len: %d", len(pkt.Pkt.GetPayload()))
-	wn, err := userConn.Write(pkt.Pkt.GetPayload())
-	if err != nil {
-		logger.Errorf("write payload failed: %s", err)
-		return
-	}
-	if wn != len(pkt.Pkt.GetPayload()) {
-		logger.Errorf("write payload not complete: actural len %d", wn)
-	}
-	logger.Debugf("write payload success: len %d", wn)
+	payload := pkt.Pkt.GetPayload()
+	logger.Debugf("write payload: %d", len(payload))
+	utils.AsyncWrite(userConn, payload, logger, nil)
 }
 
 // RecvFromDialer 持续接收服务端响应，并根据连接映射写回对应用户连接。

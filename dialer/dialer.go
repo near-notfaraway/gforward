@@ -3,9 +3,11 @@ package dialer
 import (
 	"context"
 	"fmt"
+	"net"
+	"time"
+
 	"github.com/panjf2000/gnet/v2"
 	"github.com/sirupsen/logrus"
-	"time"
 )
 
 type Dialer struct {
@@ -36,5 +38,15 @@ func (d *Dialer) RecvChan() <-chan *RecvPkt {
 func (d *Dialer) Dial(network, address string) (gnet.Conn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
 	defer cancel()
-	return d.client.DialContext(network, address, ctx)
+
+	conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	gnetConn, err := d.client.Enroll(conn)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return gnetConn, nil
 }

@@ -7,6 +7,7 @@ import (
 
 	. "github.com/bytedance/mockey"
 	"github.com/near-notfaraway/gtunnel/dialer"
+	"github.com/near-notfaraway/gtunnel/protocol"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/sirupsen/logrus"
 	. "github.com/smartystreets/goconvey/convey"
@@ -15,11 +16,29 @@ import (
 type trackingConn struct {
 	gnet.Conn // 提供测试无需调用的其余连接方法
 
-	closeCount atomic.Int32 // 记录连接被关闭的次数
+	closeCount      atomic.Int32 // 记录连接被关闭的次数
+	writeCount      atomic.Int32 // 记录同步写入调用次数
+	asyncWriteCount atomic.Int32 // 记录异步写入调用次数
+	written         []byte       // 记录最后一次写入的数据
 }
 
 func (c *trackingConn) Close() error {
 	c.closeCount.Add(1)
+	return nil
+}
+
+func (c *trackingConn) Write(buf []byte) (int, error) {
+	c.writeCount.Add(1)
+	c.written = append([]byte(nil), buf...)
+	return len(buf), nil
+}
+
+func (c *trackingConn) AsyncWrite(buf []byte, callback gnet.AsyncCallback) error {
+	c.asyncWriteCount.Add(1)
+	c.written = append([]byte(nil), buf...)
+	if callback != nil {
+		_ = callback(c, nil)
+	}
 	return nil
 }
 
@@ -49,6 +68,29 @@ func TestUserConnCloseClosesServerConn(t *testing.T) {
 		So(userRouteExists, ShouldBeFalse)
 		So(serverRouteExists, ShouldBeFalse)
 		So(serverConn.closeCount.Load(), ShouldEqual, int32(1))
+	})
+}
+
+func TestServerPayloadUsesAsyncWrite(t *testing.T) {
+	PatchConvey("Server payload should be written asynchronously to user", t, func() {
+		userConn := &trackingConn{}
+		serverConn := &trackingConn{}
+		packet := &protocol.PlainPacket{}
+		packet.SetPayload([]byte("payload"))
+		handler := &ListenHandler{
+			downloadLogger: logrus.New().WithField("test", "client"),
+		}
+		handler.serverConnMapUserConn.Store(serverConn, userConn)
+
+		handler.handleServerPacket(&dialer.RecvPkt{
+			Conn:   serverConn,
+			Pkt:    packet,
+			Logger: logrus.New().WithField("test", "dialer"),
+		})
+
+		So(userConn.writeCount.Load(), ShouldEqual, int32(0))
+		So(userConn.asyncWriteCount.Load(), ShouldEqual, int32(1))
+		So(userConn.written, ShouldResemble, packet.GetPayload())
 	})
 }
 

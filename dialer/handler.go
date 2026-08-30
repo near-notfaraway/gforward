@@ -47,10 +47,15 @@ func (dh *DialHandler) OnTraffic(conn gnet.Conn) gnet.Action {
 	buf, _ := conn.Peek(-1)
 	logger.Debugf("read buffer: len %d", len(buf))
 	pkt := dh.recvProtocol.New()
-	n, err := pkt.Unmarshal(buf)
-	if err != nil {
-		logger.Errorf("unmarshal packet failed: %s", err)
+	n, state, err := pkt.Unmarshal(buf)
+	switch state {
+	case protocol.ParseNeedMoreData:
+		logger.Debug("wait complete packet")
 		return gnet.None
+	case protocol.ParseRejected:
+		logger.Errorf("reject invalid packet: %v", err)
+		return gnet.Close
+	case protocol.ParseDone:
 	}
 	_, _ = conn.Discard(n)
 	logger.Debugf("unmarshal packet: len %d", n)

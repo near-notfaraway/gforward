@@ -46,108 +46,105 @@ func (h *MsgHandler) removeDestRoute(destConn gnet.Conn) {
 	}
 }
 
-// Start 启动上行和下行处理循环，并维护客户端连接与当前目标连接的映射。
+// handleClientMsg 处理客户端关闭、目标切换和上行数据转发。
+func (h *MsgHandler) handleClientMsg(msg *DispatchMsg) {
+	pkt := msg.pkt
+	conn := msg.conn
+	logger := msg.logger
+
+	if pkt == nil {
+		h.connMapMu.Lock()
+		route, ok := h.clientConnMapDestRoute[conn]
+		if ok {
+			delete(h.clientConnMapDestRoute, conn)
+			delete(h.destConnMapClientConn, route.conn)
+		}
+		h.connMapMu.Unlock()
+		if ok {
+			_ = route.conn.Close()
+		}
+		return
+	}
+
+	// 根据 client conn 和 dest 查找或新建 dest conn
+	dest := pkt.GetDestination()
+	logger.Debugf("packet dest: %s", dest)
+	h.connMapMu.Lock()
+	route, ok := h.clientConnMapDestRoute[conn]
+	if ok && route.destination != dest {
+		delete(h.clientConnMapDestRoute, conn)
+		delete(h.destConnMapClientConn, route.conn)
+		ok = false
+	}
+	h.connMapMu.Unlock()
+	if route != nil && route.destination != dest {
+		_ = route.conn.Close()
+	}
+	if !ok {
+		logger.Debugf("wait dial dest: %s", dest)
+		newDestConn, err := h.dialer.Dial("tcp", dest)
+		if err != nil {
+			logger.Errorf("dail dest failed: %s", err)
+			return
+		}
+		logger.Debugf("new dest conn: %s", utils.FormatGNetConn(newDestConn))
+		route = &destRoute{
+			destination: dest,
+			conn:        newDestConn,
+		}
+		h.connMapMu.Lock()
+		h.clientConnMapDestRoute[conn] = route
+		h.destConnMapClientConn[newDestConn] = conn
+		h.connMapMu.Unlock()
+	}
+	destConn := route.conn
+	logger = logger.WithField("toConn", utils.FormatGNetConn(destConn))
+
+	// 发送 pkt payload 到 dest
+	payload := pkt.GetPayload()
+	logger.Debugf("write payload: %d", len(payload))
+	utils.AsyncWrite(destConn, payload, logger, func() {
+		h.removeDestRoute(destConn)
+		_ = destConn.Close()
+	})
+}
+
+// handleDestPkt 处理目标连接关闭和下行数据转发。
+func (h *MsgHandler) handleDestPkt(pkt *dialer.RecvPkt) {
+	logger := pkt.Logger
+	if pkt.Pkt == nil {
+		h.removeDestRoute(pkt.Conn)
+		logger.Debug("removed route for closed destination connection")
+		return
+	}
+
+	// 根据 dest conn 查找 client conn
+	h.connMapMu.RLock()
+	clientConn, ok := h.destConnMapClientConn[pkt.Conn]
+	h.connMapMu.RUnlock()
+	if !ok {
+		logger.Debug("lookup client conn by dest conn failed")
+		return
+	}
+	logger = logger.WithField("toConn", utils.FormatGNetConn(clientConn))
+
+	// 发送 packet payload 到 client conn
+	payload := pkt.Pkt.GetPayload()
+	logger.Debugf("write payload: %d", len(payload))
+	utils.AsyncWrite(clientConn, payload, logger, nil)
+}
+
+// Start 启动相互独立的上行和下行处理循环。
 func (h *MsgHandler) Start() {
 	go func() {
 		for msg := range h.channel {
-			pkt := msg.pkt
-			conn := msg.conn
-			logger := msg.logger
-
-			if pkt == nil {
-				h.connMapMu.Lock()
-				route, ok := h.clientConnMapDestRoute[conn]
-				if ok {
-					delete(h.clientConnMapDestRoute, conn)
-					delete(h.destConnMapClientConn, route.conn)
-				}
-				h.connMapMu.Unlock()
-				if ok {
-					_ = route.conn.Close()
-				}
-				continue
-			}
-
-			// 根据 client conn 和 dest 查找或新建 dest conn
-			dest := pkt.GetDestination()
-			logger.Debugf("packet dest: %s", dest)
-			h.connMapMu.Lock()
-			route, ok := h.clientConnMapDestRoute[conn]
-			if ok && route.destination != dest {
-				delete(h.clientConnMapDestRoute, conn)
-				delete(h.destConnMapClientConn, route.conn)
-				ok = false
-			}
-			h.connMapMu.Unlock()
-			if route != nil && route.destination != dest {
-				_ = route.conn.Close()
-			}
-			if !ok {
-				logger.Debugf("wait dial dest: %s", dest)
-				newDestConn, err := h.dialer.Dial("tcp", dest)
-				if err != nil {
-					logger.Errorf("dail dest failed: %s", err)
-					continue
-				}
-				logger.Debugf("new dest conn: %s", utils.FormatGNetConn(newDestConn))
-				route = &destRoute{
-					destination: dest,
-					conn:        newDestConn,
-				}
-				h.connMapMu.Lock()
-				h.clientConnMapDestRoute[conn] = route
-				h.destConnMapClientConn[newDestConn] = conn
-				h.connMapMu.Unlock()
-			}
-			destConn := route.conn
-			logger = logger.WithField("toConn", utils.FormatGNetConn(destConn))
-
-			// 发送 pkt payload 到 dest
-			logger.Debugf("packet payload: len %d", len(pkt.GetPayload()))
-			wn, err := destConn.Write(pkt.GetPayload())
-			if err != nil {
-				logger.Errorf("write payload failed: %s", err)
-				h.removeDestRoute(destConn)
-				_ = destConn.Close()
-				continue
-			}
-			if wn != len(pkt.GetPayload()) {
-				logger.Errorf("write payload not complete: actural len %d", wn)
-			}
-			logger.Debugf("write payload success: len %d", wn)
+			h.handleClientMsg(msg)
 		}
 	}()
 
 	go func() {
 		for pkt := range h.dialer.RecvChan() {
-			logger := pkt.Logger
-			if pkt.Pkt == nil {
-				h.removeDestRoute(pkt.Conn)
-				logger.Debug("removed route for closed destination connection")
-				continue
-			}
-
-			// 根据 dest conn 查找 client conn
-			h.connMapMu.RLock()
-			clientConn, ok := h.destConnMapClientConn[pkt.Conn]
-			h.connMapMu.RUnlock()
-			if !ok {
-				logger.Debug("lookup client conn by dest conn failed")
-				continue
-			}
-			logger = logger.WithField("toConn", utils.FormatGNetConn(clientConn))
-
-			// 发送 packet payload 到 client conn
-			logger.Debugf("packet payload len: %d", len(pkt.Pkt.GetPayload()))
-			wn, err := clientConn.Write(pkt.Pkt.GetPayload())
-			if err != nil {
-				logger.Errorf("write payload failed: %s", err)
-				continue
-			}
-			if wn != len(pkt.Pkt.GetPayload()) {
-				logger.Errorf("write payload not complete: actural len %d", wn)
-			}
-			logger.Debugf("write payload success: len %d", wn)
+			h.handleDestPkt(pkt)
 		}
 	}()
 }
