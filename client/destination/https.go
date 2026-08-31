@@ -129,7 +129,7 @@ func extractDestWithPort(host string, defaultPort int) string {
 	if portColonIdx == -1 {
 		return fmt.Sprintf("%s:%d", host, defaultPort)
 	}
-	if strings.Index(host[portColonIdx+1:], "]") >= 0 {
+	if strings.Contains(host[portColonIdx+1:], "]") {
 		return fmt.Sprintf("%s:%d", host, defaultPort)
 	}
 	return host

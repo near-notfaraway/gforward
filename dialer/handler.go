@@ -7,6 +7,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+const recvChanSize = 20 // 出站连接接收结果通道的缓冲大小
+
 type RecvPkt struct {
 	Conn   gnet.Conn               // 接收到数据的出站连接
 	Pkt    protocol.InternalPacket // 从连接数据解析出的内部协议包，nil 表示连接关闭
@@ -25,7 +27,7 @@ func NewDialHandler(proto string, logger *logrus.Entry) *DialHandler {
 	return &DialHandler{
 		logger:       logger,
 		recvProtocol: protocol.NewInternalPacket(proto),
-		recvChan:     make(chan *RecvPkt, 20),
+		recvChan:     make(chan *RecvPkt, recvChanSize),
 	}
 }
 
