@@ -1,4 +1,4 @@
-module github.com/near-notfaraway/gtunnel
+module github.com/near-notfaraway/gforward
 
 go 1.22
 

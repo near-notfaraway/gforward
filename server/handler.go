@@ -1,160 +1,93 @@
 package server
 
 import (
-	"sync"
-
-	"github.com/near-notfaraway/gtunnel/dialer"
-	"github.com/near-notfaraway/gtunnel/utils"
+	"github.com/near-notfaraway/gforward/network/dialer"
+	"github.com/near-notfaraway/gforward/network/message"
+	"github.com/near-notfaraway/gforward/protocol"
+	"github.com/near-notfaraway/gforward/utils"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/sirupsen/logrus"
 )
 
-type destRoute struct {
-	destination string    // 当前路由指向的目标主机和端口
-	conn        gnet.Conn // 与目标站点建立的连接，拨号完成前为 nil
-	dialing     bool      // 是否正在异步拨号
-	pending     [][]byte  // 拨号完成前按到达顺序缓存的上行 payload
-}
-
 // dialToken 关联一次异步拨号与其上行上下文，作为不透明标识传给 dialer 并原样带回。
 type dialToken struct {
 	clientConn gnet.Conn     // 发起本次拨号的客户端连接
-	route      *destRoute    // 本次拨号对应的路由，用于校验结果是否仍然有效
+	session    *session      // 本次拨号对应的会话，用于校验结果是否仍然有效
 	logger     *logrus.Entry // 携带连接上下文的日志实例
 }
 
-type MsgHandler struct {
-	connMapMu              sync.RWMutex             // 保护双向连接映射的并发访问
-	clientConnMapDestRoute map[gnet.Conn]*destRoute // 维护客户端连接到当前目标路由的映射
-	destConnMapClientConn  map[gnet.Conn]gnet.Conn  // 维护目标连接到客户端连接的反向映射
-	dialer                 *dialer.Dialer           // 建立并管理目标站点连接
-	channel                <-chan *DispatchMsg      // 接收 Dispatcher 固定分配的消息
+// msgHandler 处理客户端上行数据，包括目标切换、转发负载、拨号等
+type msgHandler struct {
+	sessions *sessionTable           // 维护双向连接映射并保证跨映射操作的原子性
+	dialer   *dialer.Dialer          // 建立并管理目标站点连接
+	channel  <-chan *message.RecvMsg // 接收 Dispatcher 固定分配的消息
 }
 
-func NewMsgHandler(dl *dialer.Dialer, ch <-chan *DispatchMsg) *MsgHandler {
-	return &MsgHandler{
-		clientConnMapDestRoute: make(map[gnet.Conn]*destRoute),
-		destConnMapClientConn:  make(map[gnet.Conn]gnet.Conn),
-		dialer:                 dl,
-		channel:                ch,
+func newMsgHandler(dl *dialer.Dialer, ch <-chan *message.RecvMsg) *msgHandler {
+	return &msgHandler{
+		sessions: newSessionTable(),
+		dialer:   dl,
+		channel:  ch,
 	}
 }
 
-func (h *MsgHandler) removeDestRoute(destConn gnet.Conn) {
-	h.connMapMu.Lock()
-	defer h.connMapMu.Unlock()
+// handleClientMsg 处理客户端关闭，以及批量转发本次读取的上行数据（含目标切换）。
+func (h *msgHandler) handleClientMsg(msg *message.RecvMsg) {
+	conn := msg.Conn
+	logger := msg.Logger
 
-	clientConn, ok := h.destConnMapClientConn[destConn]
-	if !ok {
-		return
-	}
-	delete(h.destConnMapClientConn, destConn)
-
-	route, ok := h.clientConnMapDestRoute[clientConn]
-	if ok && route.conn == destConn {
-		delete(h.clientConnMapDestRoute, clientConn)
-	}
-}
-
-// writeToDest 异步转发上行 payload，并在写入失败时清理并关闭该目标路由。
-func (h *MsgHandler) writeToDest(destConn gnet.Conn, payload []byte, logger *logrus.Entry) {
-	logger.Debugf("write payload: %d", len(payload))
-	utils.AsyncWrite(destConn, payload, logger, func() {
-		h.removeDestRoute(destConn)
-		_ = destConn.Close()
-	})
-}
-
-// startDial 交由 dialer 异步拨号，避免慢拨号阻塞上行处理循环，结果经 DialResultChan 回投。
-func (h *MsgHandler) startDial(clientConn gnet.Conn, route *destRoute, dest string, logger *logrus.Entry) {
-	h.dialer.AsyncDial("tcp", dest, &dialToken{
-		clientConn: clientConn,
-		route:      route,
-		logger:     logger,
-	})
-}
-
-// handleClientMsg 处理客户端关闭、目标切换和上行数据转发。
-func (h *MsgHandler) handleClientMsg(msg *DispatchMsg) {
-	pkt := msg.pkt
-	conn := msg.conn
-	logger := msg.logger
-
-	// 客户端连接关闭：清理路由并关闭已建立的目标连接
-	if pkt == nil {
-		h.connMapMu.Lock()
-		route, ok := h.clientConnMapDestRoute[conn]
-		if ok {
-			delete(h.clientConnMapDestRoute, conn)
-			if route.conn != nil {
-				delete(h.destConnMapClientConn, route.conn)
-			}
-		}
-		h.connMapMu.Unlock()
-		if ok && route.conn != nil {
-			_ = route.conn.Close()
+	// 客户端连接关闭：清理会话并关闭已建立的目标连接
+	if len(msg.Pkts) == 0 {
+		if destConn := h.sessions.closeClient(conn); destConn != nil {
+			_ = destConn.Close()
 		}
 		return
 	}
 
+	// 按到达顺序逐个转发本次读取解析出的上行包
+	for _, pkt := range msg.Pkts {
+		h.forwardUpstream(conn, pkt, logger)
+	}
+}
+
+// forwardUpstream 转发单个上行包：命中就绪路由则写入，拨号中则入队，新建或切换目标则发起异步拨号。
+func (h *msgHandler) forwardUpstream(conn gnet.Conn, pkt protocol.InternalPacket, logger *logrus.Entry) {
 	dest := pkt.GetDestination()
 	logger.Debugf("packet dest: %s", dest)
 	payload := pkt.GetPayload()
 
-	h.connMapMu.Lock()
-	route, ok := h.clientConnMapDestRoute[conn]
-
-	// 命中同目标的现有路由：拨号中缓存 payload，已就绪则直接转发
-	if ok && route.destination == dest {
-		if route.dialing {
-			route.pending = append(route.pending, payload)
-			h.connMapMu.Unlock()
-			logger.Debugf("queue payload while dialing: %d", len(payload))
-			return
+	act := h.sessions.admitUpstream(conn, dest, payload)
+	switch act.action {
+	case upstreamActionQueued:
+		logger.Debugf("queue payload while dialing: %d", len(payload))
+	case upstreamActionForward:
+		utils.AsyncWrite(act.destConn, payload, logger, func() {
+			h.sessions.removeByDest(act.destConn)
+			_ = act.destConn.Close()
+		})
+	case upstreamActionDial:
+		if act.oldDestConn != nil {
+			_ = act.oldDestConn.Close()
 		}
-		destConn := route.conn
-		h.connMapMu.Unlock()
-		h.writeToDest(destConn, payload, logger.WithField("toConn", utils.FormatGNetConn(destConn)))
-		return
+		// 异步拨号，避免慢拨号阻塞上行处理循环，结果经 DialResultChan 回投
+		logger.Debugf("start async dial dest: %s", act.dest)
+		h.dialer.AsyncDial("tcp", act.dest, &dialToken{
+			clientConn: conn,
+			session:    act.session,
+			logger:     logger,
+		})
 	}
-
-	// 目标切换：拆除旧路由，其在途拨号结果会因 route 指针不匹配而被丢弃
-	var oldConn gnet.Conn
-	if ok {
-		delete(h.clientConnMapDestRoute, conn)
-		if route.conn != nil {
-			delete(h.destConnMapClientConn, route.conn)
-			oldConn = route.conn
-		}
-	}
-
-	// 新建拨号中的路由并缓存首个 payload，交由独立 goroutine 拨号
-	newRoute := &destRoute{
-		destination: dest,
-		dialing:     true,
-		pending:     [][]byte{payload},
-	}
-	h.clientConnMapDestRoute[conn] = newRoute
-	h.connMapMu.Unlock()
-
-	if oldConn != nil {
-		_ = oldConn.Close()
-	}
-	logger.Debugf("start async dial dest: %s", dest)
-	h.startDial(conn, newRoute, dest, logger)
 }
 
-// handleDialResult 处理异步拨号完成事件，校验路由有效后就绪并按序回放缓存数据。
-func (h *MsgHandler) handleDialResult(res *dialer.DialResult) {
+// handleDialResult 处理异步拨号完成事件，校验会话有效后就绪并按序回放缓存数据。
+func (h *msgHandler) handleDialResult(res *dialer.DialResult) {
 	token := res.Token.(*dialToken)
 	logger := token.logger
 
-	h.connMapMu.Lock()
-	route, ok := h.clientConnMapDestRoute[token.clientConn]
+	pending, matched := h.sessions.completeDial(token.clientConn, token.session, res.Conn, res.Err)
 
-	// 路由已被关闭或切换：结果失效，丢弃并关闭新建的连接
-	if !ok || route != token.route {
-		h.connMapMu.Unlock()
+	// 会话已被关闭或切换：结果失效，丢弃并关闭新建的连接
+	if !matched {
 		if res.Conn != nil {
 			_ = res.Conn.Close()
 		}
@@ -162,56 +95,53 @@ func (h *MsgHandler) handleDialResult(res *dialer.DialResult) {
 		return
 	}
 
-	// 拨号失败：移除路由并丢弃缓存数据
+	// 拨号失败：会话已被移除，丢弃缓存数据
 	if res.Err != nil {
-		delete(h.clientConnMapDestRoute, token.clientConn)
-		h.connMapMu.Unlock()
 		logger.Errorf("dial dest failed: %s", res.Err)
 		return
 	}
 
-	// 拨号成功：填充目标连接、建立反向映射并取出缓存数据
-	route.conn = res.Conn
-	route.dialing = false
-	pending := route.pending
-	route.pending = nil
-	h.destConnMapClientConn[res.Conn] = token.clientConn
-	h.connMapMu.Unlock()
-
+	// 拨号成功：按到达顺序回放缓存数据
 	logger = logger.WithField("toConn", utils.FormatGNetConn(res.Conn))
 	logger.Debugf("dial done, flush pending: %d", len(pending))
 	for _, payload := range pending {
-		h.writeToDest(res.Conn, payload, logger)
+		utils.AsyncWrite(res.Conn, payload, logger, func() {
+			h.sessions.removeByDest(res.Conn)
+			_ = res.Conn.Close()
+		})
 	}
 }
 
 // handleDestPkt 处理目标连接关闭和下行数据转发。
-func (h *MsgHandler) handleDestPkt(pkt *dialer.RecvPkt) {
-	logger := pkt.Logger
-	if pkt.Pkt == nil {
-		h.removeDestRoute(pkt.Conn)
+func (h *msgHandler) handleDestMsg(msg *message.RecvMsg) {
+	logger := msg.Logger
+	if len(msg.Pkts) == 0 {
+		h.sessions.removeByDest(msg.Conn)
 		logger.Debug("removed route for closed destination connection")
 		return
 	}
 
 	// 根据 dest conn 查找 client conn
-	h.connMapMu.RLock()
-	clientConn, ok := h.destConnMapClientConn[pkt.Conn]
-	h.connMapMu.RUnlock()
+	clientConn, ok := h.sessions.clientByDest(msg.Conn)
 	if !ok {
 		logger.Debug("lookup client conn by dest conn failed")
 		return
 	}
 	logger = logger.WithField("toConn", utils.FormatGNetConn(clientConn))
 
-	// 发送 packet payload 到 client conn
-	payload := pkt.Pkt.GetPayload()
-	logger.Debugf("write payload: %d", len(payload))
-	utils.AsyncWrite(clientConn, payload, logger, nil)
+	// 按到达顺序逐个将下行 payload 发送到 client conn
+	// 写失败无需在此清理：客户端连接的断开由 gnet 的 OnClose 触发，
+	// 经空批次 RecvMsg 走 handleClientMsg -> closeClient 统一回收路由。
+	for _, pkt := range msg.Pkts {
+		payload := pkt.GetPayload()
+		logger.Debugf("write payload: %d", len(payload))
+		utils.AsyncWrite(clientConn, payload, logger, nil)
+	}
 }
 
-// Start 启动上行和下行处理循环。上行循环串行处理客户端消息与拨号结果以保证发送顺序。
-func (h *MsgHandler) Start() {
+// Start 启动上行和下行处理循环
+func (h *msgHandler) start() {
+	// 上行循环串行处理客户端消息与拨号结果以保证发送顺序。
 	go func() {
 		for {
 			select {
@@ -220,15 +150,19 @@ func (h *MsgHandler) Start() {
 					return
 				}
 				h.handleClientMsg(msg)
-			case res := <-h.dialer.DialResultChan():
+			case res, ok := <-h.dialer.DialResultChan():
+				if !ok {
+					return
+				}
 				h.handleDialResult(res)
 			}
 		}
 	}()
 
+	// 下行循环并行处理目标连接关闭和下行数据转发
 	go func() {
-		for pkt := range h.dialer.RecvChan() {
-			h.handleDestPkt(pkt)
+		for msg := range h.dialer.RecvChan() {
+			h.handleDestMsg(msg)
 		}
 	}()
 }

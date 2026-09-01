@@ -1,6 +1,6 @@
 package main
 
-import "github.com/near-notfaraway/gtunnel/cmd"
+import "github.com/near-notfaraway/gforward/cmd"
 
 func main() {
 	cmd.Execute()

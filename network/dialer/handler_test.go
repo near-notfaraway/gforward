@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	. "github.com/bytedance/mockey"
+	"github.com/near-notfaraway/gforward/network/message"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/sirupsen/logrus"
 	. "github.com/smartystreets/goconvey/convey"
@@ -33,16 +34,16 @@ func TestOnClosePublishesConnectionEvent(t *testing.T) {
 		action := handler.OnClose(conn, closeErr)
 
 		So(action, ShouldEqual, gnet.None)
-		var pkt *RecvPkt
+		var msg *message.RecvMsg
 		select {
-		case pkt = <-handler.recvChan:
+		case msg = <-handler.recvChan:
 		default:
 		}
-		So(pkt, ShouldNotBeNil)
-		if pkt == nil {
+		So(msg, ShouldNotBeNil)
+		if msg == nil {
 			return
 		}
-		So(pkt.Conn, ShouldEqual, conn)
-		So(pkt.Pkt, ShouldBeNil)
+		So(msg.Conn, ShouldEqual, conn)
+		So(msg.Pkts, ShouldBeEmpty)
 	})
 }

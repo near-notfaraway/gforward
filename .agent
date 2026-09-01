@@ -8,7 +8,7 @@
 - 客户端通过自定义二进制协议，将目标地址和用户数据发送给 gforward 服务端。
 - 服务端连接真实目标站点，双向转发客户端与目标站点之间的 TCP 字节流。
 
-模块路径为 `github.com/near-notfaraway/gtunnel`，命令名和构建产物名为 `gforward`。项目使用 GPL-3.0 许可证。
+模块路径为 `github.com/near-notfaraway/gforward`，命令名和构建产物名为 `gforward`。项目使用 GPL-3.0 许可证。
 
 ## 2. 已实现功能
 

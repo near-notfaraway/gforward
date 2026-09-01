@@ -6,6 +6,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/near-notfaraway/gforward/network/message"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/sirupsen/logrus"
 )
@@ -49,7 +50,7 @@ func NewDialer(proto string, logger *logrus.Entry) *Dialer {
 	}
 }
 
-func (d *Dialer) RecvChan() <-chan *RecvPkt {
+func (d *Dialer) RecvChan() <-chan *message.RecvMsg {
 	return d.handler.recvChan
 }
 

@@ -2,8 +2,8 @@ package cmd
 
 import (
 	"fmt"
-	"github.com/near-notfaraway/gtunnel/diagnosis"
-	"github.com/near-notfaraway/gtunnel/server"
+	"github.com/near-notfaraway/gforward/diagnosis"
+	"github.com/near-notfaraway/gforward/server"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/cobra"
 	"log"

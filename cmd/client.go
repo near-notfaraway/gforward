@@ -6,8 +6,8 @@ import (
 	"net"
 	"strconv"
 
-	"github.com/near-notfaraway/gtunnel/client"
-	"github.com/near-notfaraway/gtunnel/diagnosis"
+	"github.com/near-notfaraway/gforward/client"
+	"github.com/near-notfaraway/gforward/diagnosis"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/cobra"
 )

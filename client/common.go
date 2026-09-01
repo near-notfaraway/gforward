@@ -4,10 +4,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/near-notfaraway/gtunnel/client/destination"
-	"github.com/near-notfaraway/gtunnel/dialer"
-	"github.com/near-notfaraway/gtunnel/protocol"
-	"github.com/near-notfaraway/gtunnel/utils"
+	"github.com/near-notfaraway/gforward/client/destination"
+	"github.com/near-notfaraway/gforward/network/dialer"
+	"github.com/near-notfaraway/gforward/network/message"
+	"github.com/near-notfaraway/gforward/protocol"
+	"github.com/near-notfaraway/gforward/utils"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/sirupsen/logrus"
 )
@@ -51,7 +52,7 @@ func NewListenHandler(mode, serverAddr string) *ListenHandler {
 
 func (lh *ListenHandler) OnBoot(e gnet.Engine) (action gnet.Action) {
 	lh.internalProtocol = &protocol.ForwardPacket{}
-	lh.dialer = dialer.NewDialer(protocol.PacketTypePlain, lh.downloadLogger)
+	lh.dialer = dialer.NewDialer(protocol.PacketTypeForward, lh.downloadLogger)
 	lh.RecvFromDialer()
 	return gnet.None
 }
@@ -168,16 +169,16 @@ func (lh *ListenHandler) OnClose(conn gnet.Conn, err error) (action gnet.Action)
 }
 
 // handleServerPacket 处理服务端数据或关闭事件，并维护双向连接映射。
-func (lh *ListenHandler) handleServerPacket(pkt *dialer.RecvPkt) {
-	logger := lh.downloadLogger.WithField("fromConn", utils.FormatGNetConn(pkt.Conn))
-	if pkt.Pkt == nil {
-		userConnVal, ok := lh.serverConnMapUserConn.LoadAndDelete(pkt.Conn)
+func (lh *ListenHandler) handleServerPacket(msg *message.RecvMsg) {
+	logger := lh.downloadLogger.WithField("fromConn", utils.FormatGNetConn(msg.Conn))
+	if len(msg.Pkts) == 0 {
+		userConnVal, ok := lh.serverConnMapUserConn.LoadAndDelete(msg.Conn)
 		if !ok {
 			logger.Debug("server conn route already removed")
 			return
 		}
 		userConn := userConnVal.(gnet.Conn)
-		if !lh.userConnMapServerConn.CompareAndDelete(userConn, pkt.Conn) {
+		if !lh.userConnMapServerConn.CompareAndDelete(userConn, msg.Conn) {
 			logger.Debug("server conn route has been replaced")
 			return
 		}
@@ -186,7 +187,7 @@ func (lh *ListenHandler) handleServerPacket(pkt *dialer.RecvPkt) {
 		return
 	}
 
-	userConnVal, ok := lh.serverConnMapUserConn.Load(pkt.Conn)
+	userConnVal, ok := lh.serverConnMapUserConn.Load(msg.Conn)
 	if !ok {
 		logger.Debug("drop packet for closed user connection")
 		return
@@ -194,16 +195,19 @@ func (lh *ListenHandler) handleServerPacket(pkt *dialer.RecvPkt) {
 	userConn := userConnVal.(gnet.Conn)
 	logger = logger.WithField("toConn", utils.FormatGNetConn(userConn))
 
-	payload := pkt.Pkt.GetPayload()
-	logger.Debugf("write payload: %d", len(payload))
-	utils.AsyncWrite(userConn, payload, logger, nil)
+	// 按到达顺序逐个将下行 payload 写回用户连接
+	for _, pkt := range msg.Pkts {
+		payload := pkt.GetPayload()
+		logger.Debugf("write payload: %d", len(payload))
+		utils.AsyncWrite(userConn, payload, logger, nil)
+	}
 }
 
 // RecvFromDialer 持续接收服务端响应，并根据连接映射写回对应用户连接。
 func (lh *ListenHandler) RecvFromDialer() {
 	go func() {
-		for pkt := range lh.dialer.RecvChan() {
-			lh.handleServerPacket(pkt)
+		for msg := range lh.dialer.RecvChan() {
+			lh.handleServerPacket(msg)
 		}
 	}()
 }

@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	. "github.com/bytedance/mockey"
-	"github.com/near-notfaraway/gtunnel/dialer"
-	"github.com/near-notfaraway/gtunnel/protocol"
+	"github.com/near-notfaraway/gforward/network/message"
+	"github.com/near-notfaraway/gforward/protocol"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/sirupsen/logrus"
 	. "github.com/smartystreets/goconvey/convey"
@@ -82,9 +82,9 @@ func TestServerPayloadUsesAsyncWrite(t *testing.T) {
 		}
 		handler.serverConnMapUserConn.Store(serverConn, userConn)
 
-		handler.handleServerPacket(&dialer.RecvPkt{
+		handler.handleServerPacket(&message.RecvMsg{
 			Conn:   serverConn,
-			Pkt:    packet,
+			Pkts:   []protocol.InternalPacket{packet},
 			Logger: logrus.New().WithField("test", "dialer"),
 		})
 
@@ -105,7 +105,7 @@ func TestServerConnCloseClosesUserConn(t *testing.T) {
 		handler.userConnMapServerConn.Store(userConn, serverConn)
 		handler.serverConnMapUserConn.Store(serverConn, userConn)
 
-		handler.handleServerPacket(&dialer.RecvPkt{Conn: serverConn})
+		handler.handleServerPacket(&message.RecvMsg{Conn: serverConn})
 
 		_, userRouteExists := handler.userConnMapServerConn.Load(userConn)
 		_, serverRouteExists := handler.serverConnMapUserConn.Load(serverConn)

@@ -23,6 +23,7 @@ func AsyncWrite(conn gnet.Conn, buf []byte, logger *logrus.Entry, onError func()
 		})
 	}
 
+	logger.Debugf("write buffer: len %d", len(buf))
 	err := conn.AsyncWrite(buf, func(_ gnet.Conn, err error) error {
 		handleResult(err)
 		return nil
