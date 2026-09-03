@@ -51,6 +51,7 @@ func TestDefaultClientListenerAddr(t *testing.T) {
 			{name: "HTTPS DNS", mode: ClientModeHTTPSDNS, wantAddr: "0.0.0.0:443"},
 			{name: "HTTP proxy", mode: ClientModeHTTPProxy, wantAddr: "0.0.0.0:8080"},
 			{name: "SOCKS5", mode: ClientModeHTTPSocks5, wantAddr: "0.0.0.0:1080"},
+			{name: "Shadowsocks", mode: ClientModeShadowsocks, wantAddr: "0.0.0.0:8388"},
 		}
 		for _, tt := range tests {
 			PatchConvey(tt.name+" should use its default port", func() {
@@ -90,7 +91,7 @@ func TestResolveClientMode(t *testing.T) {
 		})
 
 		PatchConvey("Proxy modes should not enable DNS", func() {
-			for _, mode := range []string{ClientModeHTTPProxy, ClientModeHTTPSocks5} {
+			for _, mode := range []string{ClientModeHTTPProxy, ClientModeHTTPSocks5, ClientModeShadowsocks} {
 				dnsIP, enableDNS, err := resolveClientMode(mode, "127.0.0.1:8080")
 
 				So(err, ShouldBeNil)
@@ -118,6 +119,49 @@ func TestResolveClientMode(t *testing.T) {
 
 			So(err, ShouldNotBeNil)
 			So(err.Error(), ShouldContainSubstring, "invalid client mode")
+		})
+	})
+}
+
+func TestResolveShadowsocksConfig(t *testing.T) {
+	PatchConvey("Test resolveShadowsocksConfig", t, func() {
+		PatchConvey("Non-shadowsocks modes should return no config", func() {
+			cfg, err := resolveShadowsocksConfig(ClientModeHTTPProxy, "", "")
+
+			So(err, ShouldBeNil)
+			So(cfg, ShouldBeNil)
+		})
+
+		PatchConvey("Supported AEAD methods with a password should build a config", func() {
+			for _, method := range []string{"aes-256-gcm", "chacha20-ietf-poly1305"} {
+				cfg, err := resolveShadowsocksConfig(ClientModeShadowsocks, method, "secret")
+
+				So(err, ShouldBeNil)
+				So(cfg, ShouldNotBeNil)
+				So(cfg.Method, ShouldEqual, method)
+				So(cfg.Password, ShouldEqual, "secret")
+			}
+		})
+
+		PatchConvey("A missing method should be rejected", func() {
+			_, err := resolveShadowsocksConfig(ClientModeShadowsocks, "", "secret")
+
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "requires --ss-method")
+		})
+
+		PatchConvey("An unsupported method should be rejected", func() {
+			_, err := resolveShadowsocksConfig(ClientModeShadowsocks, "rc4-md5", "secret")
+
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "unsupported shadowsocks method")
+		})
+
+		PatchConvey("A missing password should be rejected", func() {
+			_, err := resolveShadowsocksConfig(ClientModeShadowsocks, "aes-256-gcm", "")
+
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "requires --ss-password")
 		})
 	})
 }

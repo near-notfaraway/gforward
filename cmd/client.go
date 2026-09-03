@@ -7,16 +7,18 @@ import (
 	"strconv"
 
 	"github.com/near-notfaraway/gforward/client"
+	"github.com/near-notfaraway/gforward/client/destination"
 	"github.com/near-notfaraway/gforward/diagnosis"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/cobra"
 )
 
 const (
-	ClientModeHTTPDNS    = "http_dns"
-	ClientModeHTTPSDNS   = "https_dns"
-	ClientModeHTTPProxy  = "http_proxy"
-	ClientModeHTTPSocks5 = "socks5"
+	ClientModeHTTPDNS     = "http_dns"
+	ClientModeHTTPSDNS    = "https_dns"
+	ClientModeHTTPProxy   = "http_proxy"
+	ClientModeHTTPSocks5  = "socks5"
+	ClientModeShadowsocks = "shadowsocks"
 
 	clientDNSListenAddr = ":53"
 )
@@ -27,6 +29,8 @@ var clientListenerAddr string
 var clientMulticore bool
 var clientServerAddr string
 var clientVerbose bool
+var clientSSMethod string
+var clientSSPassword string
 
 // init 注册 client 子命令及其运行参数。
 func init() {
@@ -39,7 +43,7 @@ func init() {
 		},
 	}
 	clientCmd.Flags().StringVarP(&clientMode, "mode", "m",
-		"http_proxy", "one of http_dns,https_dns,http_proxy,socks5")
+		"http_proxy", "one of http_dns,https_dns,http_proxy,socks5,shadowsocks")
 	clientCmd.Flags().StringVarP(&clientListenerAddr, "listen", "l",
 		"", "IPv4 address and port listened on by client, defaults depend on mode")
 	clientCmd.Flags().StringVarP(&clientServerAddr, "server", "s",
@@ -48,6 +52,10 @@ func init() {
 		true, "run with multicore")
 	clientCmd.Flags().BoolVarP(&clientVerbose, "verbose", "v",
 		false, "log more information")
+	clientCmd.Flags().StringVar(&clientSSMethod, "ss-method",
+		"", "shadowsocks AEAD cipher (aes-256-gcm or chacha20-ietf-poly1305), required for shadowsocks mode")
+	clientCmd.Flags().StringVar(&clientSSPassword, "ss-password",
+		"", "shadowsocks password, required for shadowsocks mode")
 }
 
 func parseIPv4Addr(addr string) (string, string, error) {
@@ -76,6 +84,8 @@ func defaultClientListenerAddr(mode string) (string, error) {
 		return "0.0.0.0:8080", nil
 	case ClientModeHTTPSocks5:
 		return "0.0.0.0:1080", nil
+	case ClientModeShadowsocks:
+		return "0.0.0.0:8388", nil
 	default:
 		return "", fmt.Errorf("invalid client mode %s", mode)
 	}
@@ -96,12 +106,31 @@ func resolveClientMode(mode, listenerAddr string) (string, bool, error) {
 		if listenerPort != "443" {
 			return "", false, fmt.Errorf("https_dns listener port must be 443")
 		}
-	case ClientModeHTTPProxy, ClientModeHTTPSocks5:
+	case ClientModeHTTPProxy, ClientModeHTTPSocks5, ClientModeShadowsocks:
 		return "", false, nil
 	default:
 		return "", false, fmt.Errorf("invalid client mode %s", mode)
 	}
 	return listenerIP, true, nil
+}
+
+// resolveShadowsocksConfig 校验并构建 shadowsocks 模式所需的解析器配置；
+// 非 shadowsocks 模式返回 nil。仅支持 SIP004 AEAD：aes-256-gcm、chacha20-ietf-poly1305。
+func resolveShadowsocksConfig(mode, method, password string) (*destination.ParseConfig, error) {
+	if mode != ClientModeShadowsocks {
+		return nil, nil
+	}
+	switch method {
+	case "aes-256-gcm", "chacha20-ietf-poly1305":
+	case "":
+		return nil, fmt.Errorf("shadowsocks mode requires --ss-method")
+	default:
+		return nil, fmt.Errorf("unsupported shadowsocks method %q, want aes-256-gcm or chacha20-ietf-poly1305", method)
+	}
+	if password == "" {
+		return nil, fmt.Errorf("shadowsocks mode requires --ss-password")
+	}
+	return &destination.ParseConfig{Method: method, Password: password}, nil
 }
 
 // clientRun 校验客户端模式、初始化日志，并按模式启动 DNS 与流量监听服务。
@@ -115,6 +144,10 @@ func clientRun(_ *cobra.Command, _ []string) {
 		}
 	}
 	dnsHijackIP, enableDNS, err := resolveClientMode(clientMode, listenerAddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	ssConfig, err := resolveShadowsocksConfig(clientMode, clientSSMethod, clientSSPassword)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -141,6 +174,6 @@ func clientRun(_ *cobra.Command, _ []string) {
 			clientDNSListenAddr, dnsHijackIP)
 	}
 
-	cli := client.NewForwarder(clientMode, clientServerAddr)
+	cli := client.NewForwarder(clientMode, clientServerAddr, ssConfig)
 	log.Fatal(gnet.Run(cli, fmt.Sprintf("tcp://%s", listenerAddr), gnet.WithMulticore(clientMulticore)))
 }

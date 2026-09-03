@@ -47,21 +47,24 @@ func (c *stubConn) Write(p []byte) (int, error) {
 func TestNewParser(t *testing.T) {
 	Convey("NewParser should build the parser matching the proto", t, func() {
 		Convey("Known protos should build their concrete parsers", func() {
-			_, isHTTP := NewParser(ParserProtoHTTP).(*HTTPParser)
+			_, isHTTP := NewParser(ParserProtoHTTP, nil).(*HTTPParser)
 			So(isHTTP, ShouldBeTrue)
 
-			_, isHTTPS := NewParser(ParserProtoHTTPS).(*HTTPSParser)
+			_, isHTTPS := NewParser(ParserProtoHTTPS, nil).(*HTTPSParser)
 			So(isHTTPS, ShouldBeTrue)
 
-			_, isProxy := NewParser(ParserProtoHTTPProxy).(*HTTPProxyParser)
+			_, isProxy := NewParser(ParserProtoHTTPProxy, nil).(*HTTPProxyParser)
 			So(isProxy, ShouldBeTrue)
 
-			_, isSocks5 := NewParser(ParserProtoSocks5).(*Socks5Parser)
+			_, isSocks5 := NewParser(ParserProtoSocks5, nil).(*Socks5Parser)
 			So(isSocks5, ShouldBeTrue)
+
+			_, isShadowsocks := NewParser(ParserProtoShadowsocks, &ParseConfig{Method: "aes-256-gcm", Password: "pw"}).(*ShadowsocksParser)
+			So(isShadowsocks, ShouldBeTrue)
 		})
 
 		Convey("An unknown proto should panic", func() {
-			So(func() { NewParser("unknown") }, ShouldPanic)
+			So(func() { NewParser("unknown", nil) }, ShouldPanic)
 		})
 	})
 }

@@ -34,7 +34,8 @@ type forwarder struct {
 }
 
 // NewForwarder 根据客户端模式创建目标解析器并初始化双向流量日志。
-func NewForwarder(mode, serverAddr string) *forwarder {
+// cfg 透传给需要额外配置的解析器（当前为 shadowsocks），其余模式可传 nil。
+func NewForwarder(mode, serverAddr string, cfg *destination.ParseConfig) *forwarder {
 	var proto destination.ParserProto
 	if strings.HasSuffix(mode, "_dns") {
 		proto = destination.ParserProto(strings.TrimSuffix(mode, "_dns"))
@@ -42,7 +43,7 @@ func NewForwarder(mode, serverAddr string) *forwarder {
 		proto = destination.ParserProto(mode)
 	}
 	return &forwarder{
-		destinationParser: destination.NewParser(proto),
+		destinationParser: destination.NewParser(proto, cfg),
 		sessions:          newSessionTable(),
 		serverAddr:        serverAddr,
 		uploadLogger: logrus.WithFields(logrus.Fields{
@@ -71,14 +72,15 @@ func (f *forwarder) OnTraffic(conn gnet.Conn) gnet.Action {
 
 	for {
 		payloadLen := 0
+		var decodedPayload []byte
 
-		// 从会话缓存或解析器获取目标地址；PerRequest 模式不入缓存，每个包重新解析
+		// 从会话缓存或解析器获取目标地址；PerRequest 模式不入缓存，每次流量都进入 Parse。
 		dest, ok := f.sessions.getDest(conn)
 		var cachedDest string
 		if !ok {
 			result, err := f.destinationParser.Parse(conn)
 			if err != nil {
-				logger.Errorf("parse dest failed: %s", err)
+				logger.Errorf("parse traffic failed: %s", err)
 				return gnet.Close
 			}
 			switch result.Status {
@@ -100,6 +102,7 @@ func (f *forwarder) OnTraffic(conn gnet.Conn) gnet.Action {
 			logger.Debugf("parse new dest: %s", result.Destination)
 			dest = result.Destination
 			payloadLen = result.PayloadLen
+			decodedPayload = result.Payload
 			if !result.PerRequest {
 				cachedDest = result.Destination
 			}
@@ -108,10 +111,14 @@ func (f *forwarder) OnTraffic(conn gnet.Conn) gnet.Action {
 
 		// 组装用于发送的 packet
 		pkt := f.internalProtocol.New()
-		buf, err := conn.Peek(payloadLen)
-		if err != nil {
-			logger.Errorf("read buffer failed: %s", err)
-			return gnet.Close
+		buf := decodedPayload
+		if buf == nil {
+			var err error
+			buf, err = conn.Peek(payloadLen)
+			if err != nil {
+				logger.Errorf("read buffer failed: %s", err)
+				return gnet.Close
+			}
 		}
 		// 无负载可发时通常无需处理；但新建缓存路由（如 HTTP CONNECT、SOCKS5 隧道建立）时，
 		// 握手字节已被解析器消费，首个 packet 只携带目标、负载为空，仍需照常发包以登记会话并触发拨号，
@@ -119,13 +126,15 @@ func (f *forwarder) OnTraffic(conn gnet.Conn) gnet.Action {
 		// 该空包同时是 server 拨号目标的唯一信号：server 端仅在收到带 destination 的包时才拨号目标站点，
 		// 故对 SMTP/SSH/MySQL 等 server-first（服务端先发 banner）协议，必须在隧道建立时即发此空包触发上游拨号，
 		// 否则 app 等 server banner、server 等 app 数据将互相死锁。此处不能省包只建 session。
-		if len(buf) == 0 && cachedDest == "" {
+		if len(buf) == 0 && cachedDest == "" && decodedPayload == nil {
 			return gnet.None
 		}
 		if len(buf) > 65535 {
 			buf = buf[:65535]
 		}
-		_, _ = conn.Discard(len(buf))
+		if decodedPayload == nil {
+			_, _ = conn.Discard(len(buf))
+		}
 		logger.Debugf("read buffer: len %d", len(buf))
 		pkt.SetPayload(buf)
 		pkt.SetDestination(dest)
@@ -201,11 +210,22 @@ func (f *forwarder) handleServerMsg(msg *message.RecvMsg) {
 	}
 	logger = logger.WithField("toConn", utils.FormatGNetConn(userConn))
 
+	payloadEncoder, encodePayload := f.destinationParser.(destination.PayloadEncoder)
+
 	// 按到达顺序逐个将下行 payload 写回用户连接
 	// 写失败无需在此清理：用户连接的断开由 gnet 的 OnClose 触发，
 	// 经 purgeByUser 统一回收路由并关闭服务端连接。
 	for _, pkt := range msg.Pkts {
 		payload := pkt.GetPayload()
+		if encodePayload {
+			var err error
+			payload, err = payloadEncoder.EncodePayload(userConn, payload)
+			if err != nil {
+				logger.Errorf("encode payload failed: %s", err)
+				_ = userConn.Close()
+				return
+			}
+		}
 		logger.Debugf("write payload: %d", len(payload))
 		_ = utils.AsyncWrite(userConn, payload, logger, nil)
 	}

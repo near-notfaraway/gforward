@@ -1,7 +1,13 @@
 package client
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/md5"
+	"crypto/sha1"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -14,6 +20,7 @@ import (
 	"github.com/panjf2000/gnet/v2"
 	"github.com/sirupsen/logrus"
 	. "github.com/smartystreets/goconvey/convey"
+	"golang.org/x/crypto/hkdf"
 )
 
 type trackingConn struct {
@@ -23,6 +30,7 @@ type trackingConn struct {
 	writeCount      atomic.Int32 // 记录同步写入调用次数
 	asyncWriteCount atomic.Int32 // 记录异步写入调用次数
 	written         []byte       // 记录最后一次写入的数据
+	writes          [][]byte     // 按顺序记录每次异步写入的数据
 
 	buf []byte // OnTraffic 测试用的入站缓冲
 }
@@ -41,6 +49,7 @@ func (c *trackingConn) Write(buf []byte) (int, error) {
 func (c *trackingConn) AsyncWrite(buf []byte, callback gnet.AsyncCallback) error {
 	c.asyncWriteCount.Add(1)
 	c.written = append([]byte(nil), buf...)
+	c.writes = append(c.writes, append([]byte(nil), buf...))
 	if callback != nil {
 		_ = callback(c, nil)
 	}
@@ -82,16 +91,143 @@ func (p *fakeParser) Parse(_ gnet.Conn) (destination.ParseResult, error) {
 	return p.result, p.err
 }
 
+func newTestSSAEAD(password string, salt []byte) (cipher.AEAD, error) {
+	var masterKey []byte
+	var prev []byte
+	for len(masterKey) < 32 {
+		h := md5.New()
+		_, _ = h.Write(prev)
+		_, _ = h.Write([]byte(password))
+		prev = h.Sum(nil)
+		masterKey = append(masterKey, prev...)
+	}
+	subkey := make([]byte, 32)
+	_, err := io.ReadFull(hkdf.New(sha1.New, masterKey[:32], salt, []byte("ss-subkey")), subkey)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(subkey)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+func incrementTestSSNonce(nonce []byte) {
+	for i := range nonce {
+		nonce[i]++
+		if nonce[i] != 0 {
+			return
+		}
+	}
+}
+
+func buildSSRequest(t *testing.T, domain string, port int, payload []byte) []byte {
+	t.Helper()
+
+	salt := make([]byte, 32)
+	for i := range salt {
+		salt[i] = byte(i + 1)
+	}
+	aead, err := newTestSSAEAD("secret", salt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plaintext := []byte{0x03, byte(len(domain))}
+	plaintext = append(plaintext, domain...)
+	plaintext = append(plaintext, byte(port>>8), byte(port))
+	plaintext = append(plaintext, payload...)
+
+	nonce := make([]byte, aead.NonceSize())
+	length := []byte{byte(len(plaintext) >> 8), byte(len(plaintext))}
+	out := append([]byte(nil), salt...)
+	out = aead.Seal(out, nonce, length, nil)
+	incrementTestSSNonce(nonce)
+	out = aead.Seal(out, nonce, plaintext, nil)
+	return out
+}
+
+func buildSSPayload(t *testing.T, payload []byte, nonceValue byte) []byte {
+	t.Helper()
+
+	salt := make([]byte, 32)
+	for i := range salt {
+		salt[i] = byte(i + 1)
+	}
+	aead, err := newTestSSAEAD("secret", salt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := make([]byte, aead.NonceSize())
+	nonce[0] = nonceValue
+	length := []byte{byte(len(payload) >> 8), byte(len(payload))}
+	out := aead.Seal(nil, nonce, length, nil)
+	incrementTestSSNonce(nonce)
+	return aead.Seal(out, nonce, payload, nil)
+}
+
+func decodeSSResponse(ciphertext []byte) ([]byte, error) {
+	if len(ciphertext) < 32 {
+		return nil, fmt.Errorf("missing shadowsocks response salt")
+	}
+	aead, err := newTestSSAEAD("secret", ciphertext[:32])
+	if err != nil {
+		return nil, err
+	}
+
+	nonce := make([]byte, aead.NonceSize())
+	pos := 32
+	var plaintext []byte
+	for pos < len(ciphertext) {
+		lengthEnd := pos + 2 + aead.Overhead()
+		if lengthEnd > len(ciphertext) {
+			return nil, fmt.Errorf("truncated shadowsocks length chunk")
+		}
+		length, err := aead.Open(nil, nonce, ciphertext[pos:lengthEnd], nil)
+		if err != nil {
+			return nil, err
+		}
+		incrementTestSSNonce(nonce)
+		payloadLen := int(length[0])<<8 | int(length[1])
+		payloadEnd := lengthEnd + payloadLen + aead.Overhead()
+		if payloadEnd > len(ciphertext) {
+			return nil, fmt.Errorf("truncated shadowsocks payload chunk")
+		}
+		payload, err := aead.Open(nil, nonce, ciphertext[lengthEnd:payloadEnd], nil)
+		if err != nil {
+			return nil, err
+		}
+		incrementTestSSNonce(nonce)
+		plaintext = append(plaintext, payload...)
+		pos = payloadEnd
+	}
+	return plaintext, nil
+}
+
+func decodeForwardPacket(t *testing.T, buf []byte) *protocol.ForwardPacket {
+	t.Helper()
+	pkt := &protocol.ForwardPacket{}
+	_, state, err := pkt.Unmarshal(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != protocol.ParseDone {
+		t.Fatalf("unexpected packet parse state: %d", state)
+	}
+	return pkt
+}
+
 func TestNewForwarder(t *testing.T) {
 	PatchConvey("NewForwarder should pick the parser proto from the mode", t, func() {
 		PatchConvey("A _dns mode should strip the suffix for the parser proto", func() {
 			var gotProto destination.ParserProto
-			Mock(destination.NewParser).To(func(proto destination.ParserProto) destination.Parser {
+			Mock(destination.NewParser).To(func(proto destination.ParserProto, _ *destination.ParseConfig) destination.Parser {
 				gotProto = proto
 				return &fakeParser{}
 			}).Build()
 
-			f := NewForwarder("https_dns", "127.0.0.1:9989")
+			f := NewForwarder("https_dns", "127.0.0.1:9989", nil)
 
 			So(gotProto, ShouldEqual, destination.ParserProto("https"))
 			So(f.serverAddr, ShouldEqual, "127.0.0.1:9989")
@@ -102,12 +238,12 @@ func TestNewForwarder(t *testing.T) {
 
 		PatchConvey("A plain mode should be used as the parser proto verbatim", func() {
 			var gotProto destination.ParserProto
-			Mock(destination.NewParser).To(func(proto destination.ParserProto) destination.Parser {
+			Mock(destination.NewParser).To(func(proto destination.ParserProto, _ *destination.ParseConfig) destination.Parser {
 				gotProto = proto
 				return &fakeParser{}
 			}).Build()
 
-			NewForwarder("socks5", "127.0.0.1:9989")
+			NewForwarder("socks5", "127.0.0.1:9989", nil)
 
 			So(gotProto, ShouldEqual, destination.ParserProto("socks5"))
 		})
@@ -205,6 +341,65 @@ func TestForwarderOnTraffic(t *testing.T) {
 			So(serverConn.asyncWriteCount.Load(), ShouldEqual, int32(1))
 		})
 
+		PatchConvey("A Shadowsocks parser should reuse its parsed destination for subsequent traffic", func() {
+			plaintext := []byte("hello")
+			conn := &trackingConn{buf: buildSSRequest(t, "example.com", 443, nil)}
+			serverConn := &trackingConn{}
+			parser := destination.NewShadowsocksParser(&destination.ParseConfig{
+				Method:   "aes-256-gcm",
+				Password: "secret",
+			})
+			result, err := parser.Parse(conn)
+			So(err, ShouldBeNil)
+			So(result.Status, ShouldEqual, destination.ParseDone)
+			conn.buf = buildSSPayload(t, plaintext, 2)
+
+			f := &forwarder{
+				destinationParser: parser,
+				internalProtocol:  &protocol.ForwardPacket{},
+				sessions:          newSessionTable(),
+				uploadLogger:      logger,
+			}
+			f.sessions.byUser[conn] = &session{serverConn: serverConn}
+
+			action := f.OnTraffic(conn)
+
+			So(action, ShouldEqual, gnet.None)
+			So(serverConn.asyncWriteCount.Load(), ShouldEqual, int32(1))
+			pkt := decodeForwardPacket(t, serverConn.written)
+			So(pkt.GetDestination(), ShouldEqual, "example.com:443")
+			So(pkt.GetPayload(), ShouldResemble, plaintext)
+		})
+
+		PatchConvey("A Shadowsocks address-only request should cache the destination and start dialing", func() {
+			var dialedToken *dialToken
+			Mock((*dialer.Dialer).AsyncDial).To(func(_ *dialer.Dialer, _, _ string, token any) {
+				dialedToken = token.(*dialToken)
+			}).Build()
+
+			conn := &trackingConn{buf: buildSSRequest(t, "example.com", 443, nil)}
+			f := &forwarder{
+				destinationParser: destination.NewShadowsocksParser(&destination.ParseConfig{
+					Method:   "aes-256-gcm",
+					Password: "secret",
+				}),
+				internalProtocol: &protocol.ForwardPacket{},
+				sessions:         newSessionTable(),
+				dialer:           &dialer.Dialer{},
+				serverAddr:       "127.0.0.1:9989",
+				uploadLogger:     logger,
+			}
+
+			action := f.OnTraffic(conn)
+
+			So(action, ShouldEqual, gnet.None)
+			So(dialedToken, ShouldNotBeNil)
+			So(f.sessions.byUser[conn].dest, ShouldBeEmpty)
+			pkt := decodeForwardPacket(t, f.sessions.byUser[conn].pending[0])
+			So(pkt.GetDestination(), ShouldEqual, "example.com:443")
+			So(pkt.GetPayload(), ShouldBeEmpty)
+		})
+
 		PatchConvey("A dialing session should queue the packet without writing", func() {
 			conn := &trackingConn{buf: []byte("hello")}
 			f := &forwarder{
@@ -292,6 +487,46 @@ func TestServerPayloadUsesAsyncWrite(t *testing.T) {
 		So(userConn.writeCount.Load(), ShouldEqual, int32(0))
 		So(userConn.asyncWriteCount.Load(), ShouldEqual, int32(1))
 		So(userConn.written, ShouldResemble, packet.GetPayload())
+	})
+}
+
+func TestServerPayloadIsEncryptedForShadowsocks(t *testing.T) {
+	PatchConvey("Server payload should use one continuous Shadowsocks response stream", t, func() {
+		userConn := &trackingConn{buf: buildSSRequest(t, "example.com", 443, nil)}
+		serverConn := &trackingConn{}
+		parser := destination.NewShadowsocksParser(&destination.ParseConfig{
+			Method:   "aes-256-gcm",
+			Password: "secret",
+		})
+		result, err := parser.Parse(userConn)
+		So(err, ShouldBeNil)
+		So(result.Status, ShouldEqual, destination.ParseDone)
+
+		first := &protocol.PlainPacket{}
+		first.SetPayload([]byte("hello "))
+		second := &protocol.PlainPacket{}
+		second.SetPayload([]byte("world"))
+		handler := &forwarder{
+			destinationParser: parser,
+			sessions:          newSessionTable(),
+			downloadLogger:    logrus.New().WithField("test", "client"),
+		}
+		handler.sessions.byServer[serverConn] = userConn
+
+		handler.handleServerMsg(&message.RecvMsg{
+			Conn: serverConn,
+			Pkts: []protocol.InternalPacket{
+				first,
+				second,
+			},
+		})
+
+		So(userConn.asyncWriteCount.Load(), ShouldEqual, int32(2))
+		ciphertext := append([]byte(nil), userConn.writes[0]...)
+		ciphertext = append(ciphertext, userConn.writes[1]...)
+		plaintext, err := decodeSSResponse(ciphertext)
+		So(err, ShouldBeNil)
+		So(string(plaintext), ShouldEqual, "hello world")
 	})
 }
 
