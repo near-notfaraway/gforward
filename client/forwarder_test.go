@@ -219,6 +219,32 @@ func TestForwarderOnTraffic(t *testing.T) {
 			So(action, ShouldEqual, gnet.None)
 			So(len(f.sessions.byUser[conn].pending), ShouldEqual, 2)
 		})
+
+		PatchConvey("A tunnel setup with a cached dest but empty payload should still register a session and dial", func() {
+			// 模拟 HTTP CONNECT / SOCKS5 隧道建立：握手字节已被解析器消费，首个 packet 目标非空、负载为空
+			var dialedToken *dialToken
+			Mock((*dialer.Dialer).AsyncDial).To(func(_ *dialer.Dialer, _, _ string, token any) {
+				dialedToken = token.(*dialToken)
+			}).Build()
+
+			conn := &trackingConn{buf: nil}
+			f := &forwarder{
+				destinationParser: &fakeParser{result: destination.ParseResult{Status: destination.ParseDone, Destination: "example.com:443"}},
+				internalProtocol:  &protocol.ForwardPacket{},
+				sessions:          newSessionTable(),
+				dialer:            &dialer.Dialer{},
+				serverAddr:        "127.0.0.1:9989",
+				uploadLogger:      logger,
+			}
+
+			action := f.OnTraffic(conn)
+
+			So(action, ShouldEqual, gnet.None)
+			So(dialedToken, ShouldNotBeNil)
+			So(f.sessions.byUser[conn], ShouldNotBeNil)
+			So(f.sessions.byUser[conn].dest, ShouldEqual, "example.com:443")
+			So(f.sessions.byUser[conn].dialing, ShouldBeTrue)
+		})
 	})
 }
 
@@ -356,7 +382,7 @@ func TestDialErrorEventClearsDialingSession(t *testing.T) {
 
 // TestServerConnCloseClosesUserConn 验证服务端连接关闭事件会清理映射并关闭用户连接。
 func TestServerConnCloseClosesUserConn(t *testing.T) {
-	PatchConvey("Test forwarder.handleServerMsg with close event", t, func() {
+	PatchConvey("Test forwarder.handleDialClose with close event", t, func() {
 		userConn := &trackingConn{}
 		serverConn := &trackingConn{}
 		handler := &forwarder{
@@ -366,7 +392,7 @@ func TestServerConnCloseClosesUserConn(t *testing.T) {
 		handler.sessions.byUser[userConn] = &session{serverConn: serverConn}
 		handler.sessions.byServer[serverConn] = userConn
 
-		handler.handleServerMsg(&message.RecvMsg{Event: message.RecvEventClose, Conn: serverConn})
+		handler.handleDialClose(&message.RecvMsg{Event: message.RecvEventClose, Conn: serverConn})
 
 		_, userRouteExists := handler.sessions.byUser[userConn]
 		_, serverRouteExists := handler.sessions.byServer[serverConn]

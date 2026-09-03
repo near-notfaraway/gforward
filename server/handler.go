@@ -133,7 +133,9 @@ func (h *msgHandler) handleDialResult(res *dialer.DialResult) {
 func (h *msgHandler) handleDestMsg(msg *message.RecvMsg) {
 	logger := msg.Logger
 	if msg.Event == message.RecvEventClose || len(msg.Pkts) == 0 {
-		h.sessions.purgeByDest(msg.Conn)
+		if clientConn := h.sessions.purgeByDest(msg.Conn); clientConn != nil {
+			_ = clientConn.Close()
+		}
 		logger.Debug("removed route for closed destination connection")
 		return
 	}

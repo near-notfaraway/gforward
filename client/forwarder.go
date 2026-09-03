@@ -58,7 +58,7 @@ func NewForwarder(mode, serverAddr string) *forwarder {
 
 func (f *forwarder) OnBoot(e gnet.Engine) (action gnet.Action) {
 	f.internalProtocol = &protocol.ForwardPacket{}
-	f.dialer = dialer.NewDialer(protocol.PacketTypeForward, f.downloadLogger)
+	f.dialer = dialer.NewDialer(protocol.PacketTypePlain, f.downloadLogger)
 	f.dialer.SetDialErrorToRecvChan(true)
 	f.start()
 	return gnet.None
@@ -113,7 +113,13 @@ func (f *forwarder) OnTraffic(conn gnet.Conn) gnet.Action {
 			logger.Errorf("read buffer failed: %s", err)
 			return gnet.Close
 		}
-		if len(buf) == 0 {
+		// 无负载可发时通常无需处理；但新建缓存路由（如 HTTP CONNECT、SOCKS5 隧道建立）时，
+		// 握手字节已被解析器消费，首个 packet 只携带目标、负载为空，仍需照常发包以登记会话并触发拨号，
+		// 否则后续隧道数据会因无会话而被重新按握手协议解析（表现为把 TLS ClientHello 当成 HTTP 方法）。
+		// 该空包同时是 server 拨号目标的唯一信号：server 端仅在收到带 destination 的包时才拨号目标站点，
+		// 故对 SMTP/SSH/MySQL 等 server-first（服务端先发 banner）协议，必须在隧道建立时即发此空包触发上游拨号，
+		// 否则 app 等 server banner、server 等 app 数据将互相死锁。此处不能省包只建 session。
+		if len(buf) == 0 && cachedDest == "" {
 			return gnet.None
 		}
 		if len(buf) > 65535 {
@@ -139,7 +145,7 @@ func (f *forwarder) OnTraffic(conn gnet.Conn) gnet.Action {
 			packetLogger := logger.WithField("toConn", utils.FormatGNetConn(act.serverConn))
 			packetLogger.Debugf("write packet: len %d", len(pktBuf))
 			// 写失败不即时收敛（onError 传 nil）：serverConn 断开由 dialer 的 OnClose 触发，
-			// 经 RecvEventClose 走 handleServerMsg -> purgeByServer 统一回收路由并关闭用户连接。
+			// 经 RecvEventClose 走 handleDialClose -> purgeByServer 统一回收路由并关闭用户连接。
 			// 不同于 server 的 dest 侧即时清理——client 重拨号仍指向同一 server，链路故障时重拨大概率也失败，
 			// 即时收敛收益有限，且可避免用户连接事件循环跨连接改 sessionTable，保持 client「一律靠 OnClose」的简洁规则。
 			act.session.sendMu.Lock()
@@ -173,18 +179,20 @@ func (f *forwarder) OnClose(conn gnet.Conn, err error) (action gnet.Action) {
 	return
 }
 
-// handleServerMsg 处理服务端数据或关闭事件，并维护双向连接映射。
+// handleDialClose 处理服务端连接关闭事件：回收双向映射并级联关闭对应的用户连接。
+func (f *forwarder) handleDialClose(msg *message.RecvMsg) {
+	logger := f.downloadLogger.WithField("fromConn", utils.FormatGNetConn(msg.Conn))
+	if userConn := f.sessions.purgeByServer(msg.Conn); userConn != nil {
+		_ = userConn.Close()
+		logger.Debug("removed route for closed server connection")
+	} else {
+		logger.Debug("server conn route already removed")
+	}
+}
+
+// handleServerMsg 处理服务端下行数据，按到达顺序将 payload 写回用户连接。
 func (f *forwarder) handleServerMsg(msg *message.RecvMsg) {
 	logger := f.downloadLogger.WithField("fromConn", utils.FormatGNetConn(msg.Conn))
-	if msg.Event == message.RecvEventClose || len(msg.Pkts) == 0 {
-		if userConn := f.sessions.purgeByServer(msg.Conn); userConn != nil {
-			_ = userConn.Close()
-			logger.Debug("removed route for closed server connection")
-		} else {
-			logger.Debug("server conn route already removed")
-		}
-		return
-	}
 
 	userConn, ok := f.sessions.getByServer(msg.Conn)
 	if !ok {
@@ -248,8 +256,10 @@ func (f *forwarder) start() {
 	go func() {
 		for msg := range f.dialer.RecvChan() {
 			switch msg.Event {
-			case message.RecvEventData, message.RecvEventClose:
+			case message.RecvEventData:
 				f.handleServerMsg(msg)
+			case message.RecvEventClose:
+				f.handleDialClose(msg)
 			case message.RecvEventOpen:
 				f.handleDialOpen(msg)
 			case message.RecvEventDialError:

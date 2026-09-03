@@ -2,16 +2,17 @@ package cmd
 
 import (
 	"fmt"
+	"log"
+	"runtime"
+
 	"github.com/near-notfaraway/gforward/diagnosis"
 	"github.com/near-notfaraway/gforward/server"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/cobra"
-	"log"
-	"runtime"
 )
 
 var serverCmd *cobra.Command
-var serverPort int
+var serverListenerAddr string
 var serverMulticore bool
 var serverVerbose bool
 
@@ -25,8 +26,8 @@ func init() {
 		},
 	}
 
-	serverCmd.Flags().IntVarP(&serverPort, "port", "p",
-		9989, "listen port")
+	serverCmd.Flags().StringVarP(&serverListenerAddr, "listen", "l",
+		"0.0.0.0:9989", "IPv4 address and port listened on by server")
 	serverCmd.Flags().BoolVar(&serverMulticore, "multicore",
 		true, "run with multicore")
 	serverCmd.Flags().BoolVarP(&serverVerbose, "verbose", "v",
@@ -34,6 +35,9 @@ func init() {
 }
 
 func serverRun(cmd *cobra.Command, args []string) {
+	if _, _, err := parseIPv4Addr(serverListenerAddr); err != nil {
+		log.Fatalf("invalid server listener address: %s", err)
+	}
 	logLevel := "warn"
 	if serverVerbose {
 		logLevel = "debug"
@@ -51,5 +55,5 @@ func serverRun(cmd *cobra.Command, args []string) {
 	}
 
 	srv := server.NewDispatcher(handlerNum)
-	log.Fatal(gnet.Run(srv, fmt.Sprintf("tcp://:%d", serverPort), gnet.WithMulticore(serverMulticore)))
+	log.Fatal(gnet.Run(srv, fmt.Sprintf("tcp://%s", serverListenerAddr), gnet.WithMulticore(serverMulticore)))
 }
