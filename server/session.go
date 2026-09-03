@@ -85,10 +85,30 @@ func (t *sessionTable) admitUpstream(clientConn gnet.Conn, dest string, payload 
 	return upstreamActionResult{action: upstreamActionDial, oldDestConn: oldDestConn, session: newSess, dest: dest}
 }
 
-// completeDial 校验拨号结果对应的会话是否仍匹配，匹配且成功则就绪并返回待回放的缓存数据。
-// matched 为 false 表示会话已被关闭或切换，调用方应丢弃并关闭 conn；
-// matched 为 true 且 dialErr 非 nil 表示拨号失败，会话已被移除，pending 为 nil。
-func (t *sessionTable) completeDial(clientConn gnet.Conn, sess *session, conn gnet.Conn, dialErr error) (pending [][]byte, matched bool) {
+// bindDial 在拨号连接就绪时（OnOpen，早于该连接任何读/关事件）预注册反向映射并记录目标连接，
+// 使后续下行数据与关闭事件能命中路由。server 的下行转发独占一个 goroutine、与拨号结果所在的
+// 上行 goroutine 并行，故反向映射须借 OnOpen 提前注册（EnrollContext 同步阻塞保证其早于拨号结果），
+// 从根本上消除注册与连接事件之间的竞态。这是与 client 单 goroutine FIFO 合并处理相对偶的两阶段
+// 拆分中的第一段，dialing 保持 true，上行仍继续入队，直至 completeDial 翻转就绪。
+// matched 为 false 表示会话已被关闭或切换，调用方应关闭该连接。
+func (t *sessionTable) bindDial(clientConn gnet.Conn, sess *session, destConn gnet.Conn) (matched bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	cur, ok := t.byClient[clientConn]
+	if !ok || cur != sess {
+		return false
+	}
+	sess.destConn = destConn
+	t.byDest[destConn] = clientConn
+	return true
+}
+
+// completeDial 校验拨号结果对应的会话是否仍匹配，匹配则翻转就绪并返回待回放的缓存数据。
+// 两阶段拆分的第二段：反向映射已在 bindDial 注册，此处仅翻转 dialing 并交出 pending。
+// 回放（handleDialResult）与后续转发（handleClientMsg）同在上行 goroutine 串行，故无需 client 侧的 sendMu 保写序。
+// matched 为 false 表示会话已被关闭或切换，调用方应丢弃并关闭 conn。
+func (t *sessionTable) completeDial(clientConn gnet.Conn, sess *session) (pending [][]byte, matched bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -96,21 +116,30 @@ func (t *sessionTable) completeDial(clientConn gnet.Conn, sess *session, conn gn
 	if !ok || cur != sess {
 		return nil, false
 	}
-	if dialErr != nil {
-		delete(t.byClient, clientConn)
-		return nil, true
-	}
 
-	sess.destConn = conn
 	sess.dialing = false
 	pending = sess.pending
 	sess.pending = nil
-	t.byDest[conn] = clientConn
 	return pending, true
 }
 
-// closeClient 移除客户端连接对应的会话，并返回需关闭的目标连接（无则为 nil）。
-func (t *sessionTable) closeClient(clientConn gnet.Conn) (destConn gnet.Conn) {
+// abortDial 在拨号失败（OnOpen 未触发、无目标连接）时移除拨号中的会话。
+// 带会话指针校验，仅当映射仍指向本次拨号的会话时才删除，避免客户端连接复用或目标切换后误删新会话。
+// matched 为 false 表示会话已被关闭或替换，调用方无需再清理。
+func (t *sessionTable) abortDial(clientConn gnet.Conn, sess *session) (matched bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	cur, ok := t.byClient[clientConn]
+	if !ok || cur != sess {
+		return false
+	}
+	delete(t.byClient, clientConn)
+	return true
+}
+
+// purgeByClient 移除客户端连接对应的会话，并返回需关闭的目标连接（无则为 nil）。
+func (t *sessionTable) purgeByClient(clientConn gnet.Conn) (destConn gnet.Conn) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -126,25 +155,28 @@ func (t *sessionTable) closeClient(clientConn gnet.Conn) (destConn gnet.Conn) {
 	return nil
 }
 
-// removeByDest 依据目标连接清理双向映射，仅在反向映射仍指向该目标时删除正向映射，避免复用时误删。
-func (t *sessionTable) removeByDest(destConn gnet.Conn) {
+// purgeByDest 依据目标连接清理双向映射，仅在反向映射仍指向该目标时删除正向映射，避免复用时误删。
+// 返回该目标当前绑定的客户端连接（无则为 nil），由 caller 决定是否级联关闭。
+func (t *sessionTable) purgeByDest(destConn gnet.Conn) (clientConn gnet.Conn) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	clientConn, ok := t.byDest[destConn]
 	if !ok {
-		return
+		return nil
 	}
 	delete(t.byDest, destConn)
 
 	sess, ok := t.byClient[clientConn]
 	if ok && sess.destConn == destConn {
 		delete(t.byClient, clientConn)
+		return clientConn
 	}
+	return nil
 }
 
-// clientByDest 依据目标连接查找对应的客户端连接。
-func (t *sessionTable) clientByDest(destConn gnet.Conn) (gnet.Conn, bool) {
+// getByDest 依据目标连接查找对应的客户端连接。
+func (t *sessionTable) getByDest(destConn gnet.Conn) (gnet.Conn, bool) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 

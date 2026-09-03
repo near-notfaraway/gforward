@@ -141,6 +141,6 @@ func clientRun(_ *cobra.Command, _ []string) {
 			clientDNSListenAddr, dnsHijackIP)
 	}
 
-	cli := client.NewListenHandler(clientMode, clientServerAddr)
+	cli := client.NewForwarder(clientMode, clientServerAddr)
 	log.Fatal(gnet.Run(cli, fmt.Sprintf("tcp://%s", listenerAddr), gnet.WithMulticore(clientMulticore)))
 }

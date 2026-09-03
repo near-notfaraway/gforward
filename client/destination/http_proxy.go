@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/panjf2000/gnet/v2"
 )
 
 const (
@@ -27,13 +29,13 @@ func NewHTTPProxyParser() *HTTPProxyParser {
 	return &HTTPProxyParser{}
 }
 
-func (p *HTTPProxyParser) Clear(conn ParserConn) {
+func (p *HTTPProxyParser) Clear(conn gnet.Conn) {
 	p.connMapRequestState.Delete(conn)
 }
 
 // Parse 为 HTTPS 代理请求根据 HTTP CONNECT 的 Host 获取目的地，
 // 为普通 HTTP 代理请求根据 HTTP Host 获取目的地。
-func (p *HTTPProxyParser) Parse(conn ParserConn) (ParseResult, error) {
+func (p *HTTPProxyParser) Parse(conn gnet.Conn) (ParseResult, error) {
 	buf, err := conn.Peek(-1)
 	if err != nil {
 		return ParseResult{Status: ParseRejected}, fmt.Errorf("parser read conn failed: %w", err)

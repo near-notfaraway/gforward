@@ -6,10 +6,23 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// RecvMsg 承载一次读取解析出的包及其连接与日志上下文，供收发两端统一使用。
+// RecvEvent 标识 RecvMsg 承载的事件类型。
+type RecvEvent uint8
+
+const (
+	RecvEventData      RecvEvent = iota // 连接收到并解析出数据包
+	RecvEventClose                      // 连接关闭
+	RecvEventOpen                       // 连接就绪
+	RecvEventDialError                  // 异步拨号失败
+)
+
+// RecvMsg 承载 dialer/dispatcher 向调用方投递的连接事件、数据包与日志上下文。
 type RecvMsg struct {
+	Event  RecvEvent                 // 当前消息的事件类型
 	Conn   gnet.Conn                 // 产生本次数据的连接
-	Pkts   []protocol.InternalPacket // 本次读取解析出的内部协议包，为空表示连接关闭
+	Pkts   []protocol.InternalPacket // RecvEventData：本次读取解析出的内部协议包
+	Err    error                     // RecvEventDialError：拨号错误
+	Token  any                       // RecvEventOpen / RecvEventDialError：调用方发起拨号时透传的关联标识
 	Logger *logrus.Entry             // 携带连接上下文的日志实例
 }
 
@@ -27,7 +40,7 @@ func ParseAvailable(conn gnet.Conn, proto protocol.InternalPacket, logger *logru
 		case protocol.ParseNeedMoreData:
 			// 未解析出完整包，返回已解析的包
 			logger.Debug("wait complete packet")
-			return &RecvMsg{Conn: conn, Pkts: pkts, Logger: logger}, false
+			return &RecvMsg{Event: RecvEventData, Conn: conn, Pkts: pkts, Logger: logger}, false
 		case protocol.ParseRejected:
 			// 协议违例，调用方负责关闭连接，已解析的包一并丢弃
 			logger.Errorf("reject invalid packet: %v", err)
@@ -39,7 +52,7 @@ func ParseAvailable(conn gnet.Conn, proto protocol.InternalPacket, logger *logru
 			pkts = append(pkts, pkt)
 			// 缓冲区读干，返回已解析的包
 			if conn.InboundBuffered() == 0 {
-				return &RecvMsg{Conn: conn, Pkts: pkts, Logger: logger}, false
+				return &RecvMsg{Event: RecvEventData, Conn: conn, Pkts: pkts, Logger: logger}, false
 			}
 		}
 	}

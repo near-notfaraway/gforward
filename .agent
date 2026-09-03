@@ -187,3 +187,35 @@ SYSTEM=linux bash build.sh
 - 修改连接生命周期：同时检查客户端的三组连接映射和服务端的两组连接映射，确保双向关闭与清理对称。
 - 修改并发模型：保持同一服务端入站连接固定落到同一个 `MsgHandler`，否则 handler 内普通 map 会产生并发访问。
 - 修改代理握手：只消费已经完整解析的握手字节，保留不完整报文和粘在握手后的业务字节，避免重复发送或误丢弃首包。
+- 命名对称性：跨包/跨模块承担同一语义的类型、函数、方法必须使用同一命名。例如 client 和 server 的 `sessionTable` 上「决策上行动作」统一为 `admitUpstream`，「完成异步拨号」统一为 `completeDial`，不允许一侧叫 `admitUpstream` 另一侧叫 `dispatchUpstream`。同语义的枚举/常量前缀（如 `upstreamAction*`）、结构体后缀（如 `upstreamActionResult`）也需一致。
+- 路由表方法命名动词规约：`sessionTable` 及类似双向映射的方法按下列动词选择前缀，两侧保持一致——
+  - `admit*`：入口决策，锁内决定动作并返回锁外要执行的 I/O，不做真正的删除或建立。
+  - `complete*`：异步事件回调（如 `completeDial`），校验会话有效性后就绪或清理。
+  - `purge*`：以某个主键为输入，条件性地清理双向映射，命名为 `purgeBy<Key>`（如 `purgeByUser`、`purgeByDest`）。
+  - `get*`：只读查询另一侧的连接，命名为 `getBy<Key>`。
+  - 不使用 `close*` / `remove*` / `<sideA>By<sideB>` 等旧命名，避免与 gnet 的 `Close`、map 的 `Delete`、以及查询语义混淆。
+
+## 11. client 与 server 的拨号并发模型差异
+
+client 与 server 的 `sessionTable` 方法命名严格对称（`admitUpstream` / `completeDial` / `purgeBy*` / `getBy*`），但异步拨号的并发结构**有意不同**，不要照搬另一侧的实现。差异根源是两者部署环境与性能取舍相反：
+
+- **client 部署在家用网关/路由器，资源受限**：优先省内存、省 CPU、结构简单，不追求单条隧道连接的上下行并行。
+- **server 部署在云服务器，重吞吐**：优先单连接的上行处理与下行转发并行，并靠 per-worker（每 worker 独立 `sessionTable`）横向扩展。
+
+由此形成一组对偶取舍：
+
+| 维度 | client | server |
+| --- | --- | --- |
+| dialer 事件消费 | 单 goroutine 统一消费 `RecvChan`（下行数据、连接就绪、拨号失败） | 上行 goroutine 消费 `DialResultChan`（拨号结果）+ 下行 goroutine 消费 `RecvChan`（下行数据），双 goroutine 并行 |
+| 上行处理执行体 | gnet 事件循环（`OnTraffic`） | worker goroutine（消费 Dispatcher 分发的 channel） |
+| 拨号就绪注册 | `RecvChan` 的 `RecvEventOpen`，`handleDialOpen` 一处完成；`OnBoot` 里 `SetDialErrorToRecvChan(true)` 且不设 hook | `SetOnDialOpen(bindDial)`，在事件循环上提前注册 |
+| 拨号成功处理 | 一处：`completeDial` 合并「注册反向映射 + 记录连接 + 翻转就绪 + 交出 pending」 | 两处：`bindDial` 先注册反向映射并记录连接，`completeDial` 再翻转就绪并交出 pending |
+| 顺序保证 A（反向映射早于下行数据） | `RecvChan` 单 goroutine FIFO，Open 必早于同连接 Data，天然满足 | `bindDial` 借 `EnrollContext` 的同步阻塞，注册严格早于拨号结果与下行事件 |
+| 顺序保证 B（pending 回放早于后续转发） | per-session `sendMu` 串行化写提交（回放在 RecvChan goroutine、转发在事件循环，跨执行体） | 无需锁：回放（`handleDialResult`）与后续转发（`handleClientMsg`）同在上行 goroutine 串行 |
+
+一句话概括这组对偶：
+
+- **client** 选「dialer 事件收敛到单 goroutine」以省资源，代价是上行与拨号回放分处两个执行体，需 `sendMu` 保写序；收益是拨号就绪可在 FIFO 中一处处理，无需 OnOpen hook、无需分阶段。
+- **server** 选「上下行拆成双 goroutine」以并行、提吞吐，收益是拨号回放与后续转发同 goroutine 串行、无需 `sendMu`；代价是下行 goroutine 须尽早拿到反向映射，必须用 OnOpen hook 提前注册，拨号成功分两阶段处理。
+
+因此 client 的 `session` 带 `sendMu`、server 的不带；server 有 `bindDial` 而 client 没有——这些不是不一致，而是同一套路由语义在不同性能目标下的并发落地。修改任一侧的拨号流程时，先确认该侧的执行体划分与顺序保证来源，再动结构。

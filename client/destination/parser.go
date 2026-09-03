@@ -2,6 +2,8 @@ package destination
 
 import (
 	"fmt"
+
+	"github.com/panjf2000/gnet/v2"
 )
 
 type ParserProto string
@@ -28,18 +30,12 @@ type ParseResult struct {
 	PayloadLen  int         // 当前请求可转发的负载长度，0 表示全部缓冲区
 }
 
-type ParserConn interface {
-	Peek(n int) ([]byte, error)
-	Discard(n int) (int, error)
-	Write(p []byte) (int, error)
-}
-
 type Parser interface {
-	Parse(conn ParserConn) (ParseResult, error)
+	Parse(conn gnet.Conn) (ParseResult, error)
 }
 
 type ConnStateCleaner interface {
-	Clear(conn ParserConn)
+	Clear(conn gnet.Conn)
 }
 
 func NewParser(proto ParserProto) Parser {

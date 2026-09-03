@@ -62,6 +62,8 @@ func TestNewDispatcher(t *testing.T) {
 	PatchConvey("NewDispatcher should create the requested number of workers", t, func() {
 		// 避免创建真实 gnet 客户端与后台循环
 		Mock(dialer.NewDialer).Return(&dialer.Dialer{}).Build()
+		// newMsgHandler 会在裸 Dialer 上注册 OnDialOpen 回调，桩掉以免空指针
+		Mock((*dialer.Dialer).SetOnDialOpen).Return().Build()
 		Mock((*msgHandler).start).Return().Build()
 
 		d := NewDispatcher(3)
@@ -77,7 +79,7 @@ func TestNewDispatcher(t *testing.T) {
 }
 
 func TestDispatcherOnClose(t *testing.T) {
-	PatchConvey("OnClose should dispatch an empty RecvMsg as a close sentinel", t, func() {
+	PatchConvey("OnClose should dispatch a close event", t, func() {
 		ch := make(chan *message.RecvMsg, 1)
 		d := &dispatcher{
 			workers:      []*dispatchWorker{{channel: ch}},
@@ -90,6 +92,7 @@ func TestDispatcherOnClose(t *testing.T) {
 		So(action, ShouldEqual, gnet.None)
 		msg := <-ch
 		So(msg.Conn, ShouldEqual, conn)
+		So(msg.Event, ShouldEqual, message.RecvEventClose)
 		So(len(msg.Pkts), ShouldEqual, 0)
 	})
 }

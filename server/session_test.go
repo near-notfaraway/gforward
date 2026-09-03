@@ -1,7 +1,6 @@
 package server
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/panjf2000/gnet/v2"
@@ -98,6 +97,49 @@ func TestSessionTableAdmitUpstream(t *testing.T) {
 	})
 }
 
+func TestSessionTableBindDial(t *testing.T) {
+	Convey("bindDial should pre-register the reverse route when the session still matches", t, func() {
+		clientConn := &stubConn{}
+		destConn := &stubConn{}
+		table := newSessionTable()
+
+		Convey("Missing client session should report not matched", func() {
+			sess := &session{dest: "example.com:80", dialing: true}
+
+			matched := table.bindDial(clientConn, sess, destConn)
+
+			So(matched, ShouldBeFalse)
+			_, exists := table.byDest[destConn]
+			So(exists, ShouldBeFalse)
+		})
+
+		Convey("Session pointer mismatch should report not matched", func() {
+			current := &session{dest: "example.com:80", dialing: true}
+			stale := &session{dest: "example.com:80", dialing: true}
+			table.byClient[clientConn] = current
+
+			matched := table.bindDial(clientConn, stale, destConn)
+
+			So(matched, ShouldBeFalse)
+			So(current.destConn, ShouldBeNil)
+			_, exists := table.byDest[destConn]
+			So(exists, ShouldBeFalse)
+		})
+
+		Convey("Matched session should bind destConn and reverse route while staying dialing", func() {
+			sess := &session{dest: "example.com:80", dialing: true}
+			table.byClient[clientConn] = sess
+
+			matched := table.bindDial(clientConn, sess, destConn)
+
+			So(matched, ShouldBeTrue)
+			So(sess.destConn, ShouldEqual, destConn)
+			So(sess.dialing, ShouldBeTrue)
+			So(table.byDest[destConn], ShouldEqual, clientConn)
+		})
+	})
+}
+
 func TestSessionTableCompleteDial(t *testing.T) {
 	Convey("completeDial should validate the session before flipping to ready", t, func() {
 		clientConn := &stubConn{}
@@ -107,7 +149,7 @@ func TestSessionTableCompleteDial(t *testing.T) {
 		Convey("Missing client session should report not matched", func() {
 			sess := &session{dest: "example.com:80", dialing: true}
 
-			pending, matched := table.completeDial(clientConn, sess, destConn, nil)
+			pending, matched := table.completeDial(clientConn, sess)
 
 			So(matched, ShouldBeFalse)
 			So(pending, ShouldBeNil)
@@ -118,34 +160,25 @@ func TestSessionTableCompleteDial(t *testing.T) {
 			stale := &session{dest: "example.com:80", dialing: true}
 			table.byClient[clientConn] = current
 
-			pending, matched := table.completeDial(clientConn, stale, destConn, nil)
+			pending, matched := table.completeDial(clientConn, stale)
 
 			So(matched, ShouldBeFalse)
 			So(pending, ShouldBeNil)
 			So(table.byClient[clientConn], ShouldEqual, current)
 		})
 
-		Convey("Matched dial error should remove the session and return no pending", func() {
-			sess := &session{dest: "example.com:80", dialing: true, pending: [][]byte{[]byte("x")}}
-			table.byClient[clientConn] = sess
-
-			pending, matched := table.completeDial(clientConn, sess, nil, errors.New("dial failed"))
-
-			So(matched, ShouldBeTrue)
-			So(pending, ShouldBeNil)
-			_, exists := table.byClient[clientConn]
-			So(exists, ShouldBeFalse)
-		})
-
-		Convey("Matched success should mark ready and return pending payloads", func() {
+		Convey("Matched success should flip ready and return pending payloads", func() {
+			// destConn/byDest 已由 bindDial 预注册，completeDial 仅翻转 dialing 并交出 pending
 			sess := &session{
-				dest:    "example.com:80",
-				dialing: true,
-				pending: [][]byte{[]byte("a"), []byte("b")},
+				dest:     "example.com:80",
+				dialing:  true,
+				destConn: destConn,
+				pending:  [][]byte{[]byte("a"), []byte("b")},
 			}
 			table.byClient[clientConn] = sess
+			table.byDest[destConn] = clientConn
 
-			pending, matched := table.completeDial(clientConn, sess, destConn, nil)
+			pending, matched := table.completeDial(clientConn, sess)
 
 			So(matched, ShouldBeTrue)
 			So(pending, ShouldResemble, [][]byte{[]byte("a"), []byte("b")})
@@ -155,15 +188,50 @@ func TestSessionTableCompleteDial(t *testing.T) {
 			So(table.byDest[destConn], ShouldEqual, clientConn)
 		})
 	})
+
+	Convey("abortDial should remove the dialing session only when it still matches", t, func() {
+		clientConn := &stubConn{}
+		table := newSessionTable()
+
+		Convey("Missing client session should report not matched", func() {
+			sess := &session{dest: "example.com:80", dialing: true}
+
+			matched := table.abortDial(clientConn, sess)
+
+			So(matched, ShouldBeFalse)
+		})
+
+		Convey("Session pointer mismatch should keep the current session", func() {
+			current := &session{dest: "example.com:80", dialing: true}
+			stale := &session{dest: "example.com:80", dialing: true}
+			table.byClient[clientConn] = current
+
+			matched := table.abortDial(clientConn, stale)
+
+			So(matched, ShouldBeFalse)
+			So(table.byClient[clientConn], ShouldEqual, current)
+		})
+
+		Convey("Matched session should be removed", func() {
+			sess := &session{dest: "example.com:80", dialing: true, pending: [][]byte{[]byte("x")}}
+			table.byClient[clientConn] = sess
+
+			matched := table.abortDial(clientConn, sess)
+
+			So(matched, ShouldBeTrue)
+			_, exists := table.byClient[clientConn]
+			So(exists, ShouldBeFalse)
+		})
+	})
 }
 
-func TestSessionTableCloseClient(t *testing.T) {
-	Convey("closeClient should remove the session and surface the dest conn to close", t, func() {
+func TestSessionTablePurgeByClient(t *testing.T) {
+	Convey("purgeByClient should remove the session and surface the dest conn to close", t, func() {
 		clientConn := &stubConn{}
 		table := newSessionTable()
 
 		Convey("Unknown client should return no dest conn", func() {
-			destConn := table.closeClient(clientConn)
+			destConn := table.purgeByClient(clientConn)
 
 			So(destConn, ShouldBeNil)
 		})
@@ -173,7 +241,7 @@ func TestSessionTableCloseClient(t *testing.T) {
 			table.byClient[clientConn] = &session{dest: "example.com:80", destConn: connToDest}
 			table.byDest[connToDest] = clientConn
 
-			destConn := table.closeClient(clientConn)
+			destConn := table.purgeByClient(clientConn)
 
 			So(destConn, ShouldEqual, connToDest)
 			_, clientExists := table.byClient[clientConn]
@@ -185,7 +253,7 @@ func TestSessionTableCloseClient(t *testing.T) {
 		Convey("Dialing session without dest conn should remove client route only", func() {
 			table.byClient[clientConn] = &session{dest: "example.com:80", dialing: true}
 
-			destConn := table.closeClient(clientConn)
+			destConn := table.purgeByClient(clientConn)
 
 			So(destConn, ShouldBeNil)
 			_, clientExists := table.byClient[clientConn]
@@ -194,8 +262,8 @@ func TestSessionTableCloseClient(t *testing.T) {
 	})
 }
 
-func TestSessionTableClientByDest(t *testing.T) {
-	Convey("clientByDest should look up the client conn by dest conn", t, func() {
+func TestSessionTableGetByDest(t *testing.T) {
+	Convey("getByDest should look up the client conn by dest conn", t, func() {
 		clientConn := &stubConn{}
 		destConn := &stubConn{}
 		table := newSessionTable()
@@ -203,7 +271,7 @@ func TestSessionTableClientByDest(t *testing.T) {
 		Convey("Known dest conn should return its client conn", func() {
 			table.byDest[destConn] = clientConn
 
-			got, ok := table.clientByDest(destConn)
+			got, ok := table.getByDest(destConn)
 
 			So(ok, ShouldBeTrue)
 			So(got, ShouldEqual, clientConn)
@@ -212,7 +280,7 @@ func TestSessionTableClientByDest(t *testing.T) {
 		Convey("Unknown dest conn should report miss", func() {
 			var unknown gnet.Conn = &stubConn{}
 
-			got, ok := table.clientByDest(unknown)
+			got, ok := table.getByDest(unknown)
 
 			So(ok, ShouldBeFalse)
 			So(got, ShouldBeNil)

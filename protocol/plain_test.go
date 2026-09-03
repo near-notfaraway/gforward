@@ -28,3 +28,22 @@ func TestPlainPacketUnmarshalState(t *testing.T) {
 		})
 	})
 }
+
+func TestPlainPacketAccessors(t *testing.T) {
+	Convey("PlainPacket accessors should carry only the raw payload", t, func() {
+		packet := (&PlainPacket{}).New()
+		_, isPlain := packet.(*PlainPacket)
+		So(isPlain, ShouldBeTrue)
+
+		packet.SetPayload([]byte("raw"))
+		So(packet.GetPayload(), ShouldResemble, []byte("raw"))
+
+		// PlainPacket carries no destination frame; SetDestination is a no-op.
+		packet.SetDestination("ignored")
+		So(packet.GetDestination(), ShouldEqual, "")
+
+		buf, err := packet.Marshal()
+		So(err, ShouldBeNil)
+		So(buf, ShouldResemble, []byte("raw"))
+	})
+}

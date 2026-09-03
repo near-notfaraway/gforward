@@ -3,10 +3,12 @@ package destination
 import (
 	"bytes"
 	"fmt"
-	"github.com/txthinking/socks5"
 	"net"
 	"slices"
 	"sync"
+
+	"github.com/panjf2000/gnet/v2"
+	"github.com/txthinking/socks5"
 )
 
 type ConnState int
@@ -26,13 +28,13 @@ func NewSocks5Parser() *Socks5Parser {
 	return &Socks5Parser{}
 }
 
-func (p *Socks5Parser) Clear(conn ParserConn) {
+func (p *Socks5Parser) Clear(conn gnet.Conn) {
 	p.connMapState.Delete(conn)
 }
 
 // Parse 根据 Socks5 Request Address 来获取目的地
 // https://datatracker.ietf.org/doc/html/rfc1928 [SOCKS Protocol Version 5]
-func (p *Socks5Parser) Parse(conn ParserConn) (ParseResult, error) {
+func (p *Socks5Parser) Parse(conn gnet.Conn) (ParseResult, error) {
 	for {
 		buf, err := conn.Peek(-1)
 		if err != nil {
@@ -86,7 +88,7 @@ func (p *Socks5Parser) Parse(conn ParserConn) (ParseResult, error) {
 	}
 }
 
-func (p *Socks5Parser) getConnState(conn ParserConn) ConnState {
+func (p *Socks5Parser) getConnState(conn gnet.Conn) ConnState {
 	if state, ok := p.connMapState.Load(conn); ok {
 		return state.(ConnState)
 	}
@@ -94,13 +96,13 @@ func (p *Socks5Parser) getConnState(conn ParserConn) ConnState {
 	return connStateInit
 }
 
-func (p *Socks5Parser) reject(conn ParserConn, err error) (ParseResult, error) {
+func (p *Socks5Parser) reject(conn gnet.Conn, err error) (ParseResult, error) {
 	p.connMapState.Delete(conn)
 	return ParseResult{Status: ParseRejected}, err
 }
 
 // handleNegotiationRequest 校验 SOCKS5 认证方式并返回无认证协商结果。
-func (p *Socks5Parser) handleNegotiationRequest(conn ParserConn, buf []byte) error {
+func (p *Socks5Parser) handleNegotiationRequest(conn gnet.Conn, buf []byte) error {
 	req, err := socks5.NewNegotiationRequestFrom(bytes.NewReader(buf))
 	if err != nil {
 		return fmt.Errorf("invalid sock5 nago request: %w", err)
@@ -125,7 +127,7 @@ func (p *Socks5Parser) handleNegotiationRequest(conn ParserConn, buf []byte) err
 }
 
 // handleRequest 校验 SOCKS5 CONNECT 请求、返回响应并提取目标地址。
-func (p *Socks5Parser) handleRequest(conn ParserConn, buf []byte) (string, error) {
+func (p *Socks5Parser) handleRequest(conn gnet.Conn, buf []byte) (string, error) {
 	req, err := socks5.NewRequestFrom(bytes.NewReader(buf))
 	if err != nil {
 		return "", fmt.Errorf("invalid sock5 request: %w", err)

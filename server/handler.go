@@ -24,11 +24,24 @@ type msgHandler struct {
 }
 
 func newMsgHandler(dl *dialer.Dialer, ch <-chan *message.RecvMsg) *msgHandler {
-	return &msgHandler{
+	h := &msgHandler{
 		sessions: newSessionTable(),
 		dialer:   dl,
 		channel:  ch,
 	}
+	// 连接就绪即预注册反向映射，确保早于该连接的任何下行/关闭事件，消除注册竞态。
+	dl.SetOnDialOpen(h.bindDial)
+	return h
+}
+
+// bindDial 在拨号连接就绪时于事件循环上预注册路由；会话已失效则关闭该连接。
+func (h *msgHandler) bindDial(conn gnet.Conn) gnet.Action {
+	token := conn.Context().(*dialToken)
+	if h.sessions.bindDial(token.clientConn, token.session, conn) {
+		return gnet.None
+	}
+	token.logger.Debug("drop dial open for stale session")
+	return gnet.Close
 }
 
 // handleClientMsg 处理客户端关闭，以及批量转发本次读取的上行数据（含目标切换）。
@@ -37,8 +50,8 @@ func (h *msgHandler) handleClientMsg(msg *message.RecvMsg) {
 	logger := msg.Logger
 
 	// 客户端连接关闭：清理会话并关闭已建立的目标连接
-	if len(msg.Pkts) == 0 {
-		if destConn := h.sessions.closeClient(conn); destConn != nil {
+	if msg.Event == message.RecvEventClose || len(msg.Pkts) == 0 {
+		if destConn := h.sessions.purgeByClient(conn); destConn != nil {
 			_ = destConn.Close()
 		}
 		return
@@ -62,7 +75,7 @@ func (h *msgHandler) forwardUpstream(conn gnet.Conn, pkt protocol.InternalPacket
 		logger.Debugf("queue payload while dialing: %d", len(payload))
 	case upstreamActionForward:
 		utils.AsyncWrite(act.destConn, payload, logger, func() {
-			h.sessions.removeByDest(act.destConn)
+			h.sessions.purgeByDest(act.destConn)
 			_ = act.destConn.Close()
 		})
 	case upstreamActionDial:
@@ -79,25 +92,29 @@ func (h *msgHandler) forwardUpstream(conn gnet.Conn, pkt protocol.InternalPacket
 	}
 }
 
-// handleDialResult 处理异步拨号完成事件，校验会话有效后就绪并按序回放缓存数据。
+// handleDialResult 处理异步拨号完成事件，校验会话有效后翻转就绪并按序回放缓存数据。
+// 两阶段拆分的第二段：反向映射已在 bindDial 预注册，此处仅翻转 dialing 并回放 pending。
+// 与 handleClientMsg 同在上行 goroutine 串行执行，回放先于后续转发提交，无需额外写序锁
 func (h *msgHandler) handleDialResult(res *dialer.DialResult) {
 	token := res.Token.(*dialToken)
 	logger := token.logger
 
-	pending, matched := h.sessions.completeDial(token.clientConn, token.session, res.Conn, res.Err)
-
-	// 会话已被关闭或切换：结果失效，丢弃并关闭新建的连接
-	if !matched {
-		if res.Conn != nil {
-			_ = res.Conn.Close()
+	// 拨号失败：OnOpen 未触发，无反向映射需清理，校验会话仍匹配后移除
+	if res.Err != nil {
+		if h.sessions.abortDial(token.clientConn, token.session) {
+			logger.Errorf("dial dest failed: %s", res.Err)
+		} else {
+			logger.Debug("drop stale dial error")
 		}
-		logger.Debug("drop stale dial result")
 		return
 	}
 
-	// 拨号失败：会话已被移除，丢弃缓存数据
-	if res.Err != nil {
-		logger.Errorf("dial dest failed: %s", res.Err)
+	pending, matched := h.sessions.completeDial(token.clientConn, token.session)
+
+	// 会话已被关闭或切换：结果失效，关闭新建的连接（其 OnClose 会经 purgeByDest 清理已注册的反向映射）
+	if !matched {
+		_ = res.Conn.Close()
+		logger.Debug("drop stale dial result")
 		return
 	}
 
@@ -106,7 +123,7 @@ func (h *msgHandler) handleDialResult(res *dialer.DialResult) {
 	logger.Debugf("dial done, flush pending: %d", len(pending))
 	for _, payload := range pending {
 		utils.AsyncWrite(res.Conn, payload, logger, func() {
-			h.sessions.removeByDest(res.Conn)
+			h.sessions.purgeByDest(res.Conn)
 			_ = res.Conn.Close()
 		})
 	}
@@ -115,14 +132,14 @@ func (h *msgHandler) handleDialResult(res *dialer.DialResult) {
 // handleDestPkt 处理目标连接关闭和下行数据转发。
 func (h *msgHandler) handleDestMsg(msg *message.RecvMsg) {
 	logger := msg.Logger
-	if len(msg.Pkts) == 0 {
-		h.sessions.removeByDest(msg.Conn)
+	if msg.Event == message.RecvEventClose || len(msg.Pkts) == 0 {
+		h.sessions.purgeByDest(msg.Conn)
 		logger.Debug("removed route for closed destination connection")
 		return
 	}
 
 	// 根据 dest conn 查找 client conn
-	clientConn, ok := h.sessions.clientByDest(msg.Conn)
+	clientConn, ok := h.sessions.getByDest(msg.Conn)
 	if !ok {
 		logger.Debug("lookup client conn by dest conn failed")
 		return
@@ -131,7 +148,7 @@ func (h *msgHandler) handleDestMsg(msg *message.RecvMsg) {
 
 	// 按到达顺序逐个将下行 payload 发送到 client conn
 	// 写失败无需在此清理：客户端连接的断开由 gnet 的 OnClose 触发，
-	// 经空批次 RecvMsg 走 handleClientMsg -> closeClient 统一回收路由。
+	// 经 RecvEventClose 走 handleClientMsg -> purgeByClient 统一回收路由。
 	for _, pkt := range msg.Pkts {
 		payload := pkt.GetPayload()
 		logger.Debugf("write payload: %d", len(payload))
@@ -141,7 +158,7 @@ func (h *msgHandler) handleDestMsg(msg *message.RecvMsg) {
 
 // Start 启动上行和下行处理循环
 func (h *msgHandler) start() {
-	// 上行循环串行处理客户端消息与拨号结果以保证发送顺序。
+	// 上行循环串行处理客户端消息与拨号结果，使拨号回放与后续转发同 goroutine 串行以保证发送顺序。
 	go func() {
 		for {
 			select {
@@ -159,7 +176,8 @@ func (h *msgHandler) start() {
 		}
 	}()
 
-	// 下行循环并行处理目标连接关闭和下行数据转发
+	// 下行循环独占一个 goroutine，与上行并行以提升云端吞吐；反向映射的注册竞态由 bindDial 在 OnOpen 提前完成来消除。
+	// 这与 client 将下行/就绪/拨号失败收敛到单 goroutine 的取舍相对偶，背景见 .agent 第 11 节。
 	go func() {
 		for msg := range h.dialer.RecvChan() {
 			h.handleDestMsg(msg)

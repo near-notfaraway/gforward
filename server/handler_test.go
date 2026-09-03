@@ -22,6 +22,7 @@ type stubConn struct {
 	asyncWriteErr   error  // 模拟异步写入失败
 	closeCount      int    // 记录连接关闭次数
 	written         []byte // 记录最后一次写入的数据
+	context         any    // 保存拨号时透传的连接上下文
 }
 
 func (c *stubConn) Write(buf []byte) (int, error) {
@@ -52,9 +53,13 @@ func (c *stubConn) RemoteAddr() net.Addr {
 	return nil
 }
 
-// TestRemoveByDestOnlyRemovesMatchingClientRoute 验证迟到的关闭事件不会误删新路由。
-func TestRemoveByDestOnlyRemovesMatchingClientRoute(t *testing.T) {
-	PatchConvey("Test sessionTable.removeByDest", t, func() {
+func (c *stubConn) Context() any {
+	return c.context
+}
+
+// TestPurgeByDestOnlyRemovesMatchingClientRoute 验证迟到的关闭事件不会误删新路由。
+func TestPurgeByDestOnlyRemovesMatchingClientRoute(t *testing.T) {
+	PatchConvey("Test sessionTable.purgeByDest", t, func() {
 		clientConn := &stubConn{}
 		oldDestConn := &stubConn{}
 		currentDestConn := &stubConn{}
@@ -72,7 +77,7 @@ func TestRemoveByDestOnlyRemovesMatchingClientRoute(t *testing.T) {
 		}
 
 		PatchConvey("Closing an old destination should preserve the current client route", func() {
-			sessions.removeByDest(oldDestConn)
+			sessions.purgeByDest(oldDestConn)
 
 			_, oldRouteExists := sessions.byDest[oldDestConn]
 			So(oldRouteExists, ShouldBeFalse)
@@ -81,7 +86,7 @@ func TestRemoveByDestOnlyRemovesMatchingClientRoute(t *testing.T) {
 		})
 
 		PatchConvey("Closing the current destination should remove both routes", func() {
-			sessions.removeByDest(currentDestConn)
+			sessions.purgeByDest(currentDestConn)
 
 			_, reverseRouteExists := sessions.byDest[currentDestConn]
 			_, clientRouteExists := sessions.byClient[clientConn]
@@ -319,7 +324,9 @@ func TestMsgHandlerHandleDestMsg(t *testing.T) {
 }
 
 func TestNewMsgHandler(t *testing.T) {
-	Convey("newMsgHandler should wire the dialer, channel and a fresh session table", t, func() {
+	PatchConvey("newMsgHandler should wire the dialer, channel and a fresh session table", t, func() {
+		// newMsgHandler 会在裸 Dialer 上注册 OnDialOpen 回调，桩掉以免空指针
+		Mock((*dialer.Dialer).SetOnDialOpen).Return().Build()
 		ch := make(chan *message.RecvMsg)
 		dl := &dialer.Dialer{}
 
@@ -330,6 +337,39 @@ func TestNewMsgHandler(t *testing.T) {
 		So(handler.sessions, ShouldNotBeNil)
 		So(handler.sessions.byClient, ShouldNotBeNil)
 		So(handler.sessions.byDest, ShouldNotBeNil)
+	})
+}
+
+func TestMsgHandlerBindDial(t *testing.T) {
+	PatchConvey("bindDial should pre-register the reverse route or close a stale conn", t, func() {
+		clientConn := &stubConn{}
+		logger := logrus.New().WithField("test", "server")
+
+		PatchConvey("A matched session should register and keep the connection open", func() {
+			handler := &msgHandler{sessions: newSessionTable()}
+			sess := &session{dest: "example.com:80", dialing: true}
+			handler.sessions.byClient[clientConn] = sess
+
+			destConn := &stubConn{context: &dialToken{clientConn: clientConn, session: sess, logger: logger}}
+			action := handler.bindDial(destConn)
+
+			So(action, ShouldEqual, gnet.None)
+			So(handler.sessions.byDest[destConn], ShouldEqual, clientConn)
+			So(sess.destConn, ShouldEqual, destConn)
+		})
+
+		PatchConvey("A stale session should close the connection", func() {
+			handler := &msgHandler{sessions: newSessionTable()}
+			sess := &session{dest: "example.com:80", dialing: true}
+			// byClient 中没有该会话，视为已失效
+
+			destConn := &stubConn{context: &dialToken{clientConn: clientConn, session: sess, logger: logger}}
+			action := handler.bindDial(destConn)
+
+			So(action, ShouldEqual, gnet.Close)
+			_, exists := handler.sessions.byDest[destConn]
+			So(exists, ShouldBeFalse)
+		})
 	})
 }
 

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	"github.com/panjf2000/gnet/v2"
 )
 
 // HTTPParser 适配 DNS 劫持 HTTP 的透明代理场景
@@ -17,7 +19,7 @@ func NewHTTPParser() *HTTPParser {
 }
 
 // Parse 根据 HTTP Host 来获取目的地
-func (p *HTTPParser) Parse(conn ParserConn) (ParseResult, error) {
+func (p *HTTPParser) Parse(conn gnet.Conn) (ParseResult, error) {
 	buf, err := conn.Peek(-1)
 	if err != nil {
 		return ParseResult{Status: ParseRejected}, fmt.Errorf("parser read conn failed: %w", err)
