@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"strconv"
 
 	"github.com/near-notfaraway/gforward/client"
@@ -63,15 +64,15 @@ func parseIPv4Addr(addr string) (string, string, error) {
 	if err != nil {
 		return "", "", fmt.Errorf("address %q must be IPv4:port: %w", addr, err)
 	}
-	ip := net.ParseIP(host)
-	if ip == nil || ip.To4() == nil {
+	ip, err := netip.ParseAddr(host)
+	if err != nil || !ip.Is4() {
 		return "", "", fmt.Errorf("address host %q is not a valid IPv4 address", host)
 	}
 	portNumber, err := strconv.Atoi(port)
 	if err != nil || portNumber < 1 || portNumber > 65535 {
 		return "", "", fmt.Errorf("address port %q is not valid", port)
 	}
-	return ip.To4().String(), port, nil
+	return ip.String(), port, nil
 }
 
 func defaultClientListenerAddr(mode string) (string, error) {
@@ -175,5 +176,7 @@ func clientRun(_ *cobra.Command, _ []string) {
 	}
 
 	cli := client.NewForwarder(clientMode, clientServerAddr, ssConfig)
-	log.Fatal(gnet.Run(cli, fmt.Sprintf("tcp://%s", listenerAddr), gnet.WithMulticore(clientMulticore)))
+	if err := gnet.Run(cli, fmt.Sprintf("tcp://%s", listenerAddr), gnet.WithMulticore(clientMulticore)); err != nil {
+		log.Fatal(err)
+	}
 }

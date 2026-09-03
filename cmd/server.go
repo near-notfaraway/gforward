@@ -55,5 +55,7 @@ func serverRun(cmd *cobra.Command, args []string) {
 	}
 
 	srv := server.NewDispatcher(handlerNum)
-	log.Fatal(gnet.Run(srv, fmt.Sprintf("tcp://%s", serverListenerAddr), gnet.WithMulticore(serverMulticore)))
+	if err := gnet.Run(srv, fmt.Sprintf("tcp://%s", serverListenerAddr), gnet.WithMulticore(serverMulticore)); err != nil {
+		log.Fatal(err)
+	}
 }
