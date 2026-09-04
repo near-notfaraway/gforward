@@ -93,7 +93,7 @@ func TestParseAvailable(t *testing.T) {
 		})
 
 		PatchConvey("Insufficient data should need more without rejecting", func() {
-			conn := &bufferConn{buf: []byte{0x00}}
+			conn := &bufferConn{buf: []byte{0x01}}
 
 			msg, rejected := ParseAvailable(conn, &protocol.ForwardPacket{}, logger)
 
@@ -102,7 +102,7 @@ func TestParseAvailable(t *testing.T) {
 		})
 
 		PatchConvey("A protocol violation should reject and drop parsed packets", func() {
-			// destinationLen==0 触发 ForwardPacket 的 ParseRejected
+			// addrLen==0 触发 ForwardPacket 的 ParseRejected
 			conn := &bufferConn{buf: []byte{0x00, 0x00, 0x00, 0x00}}
 
 			msg, rejected := ParseAvailable(conn, &protocol.ForwardPacket{}, logger)

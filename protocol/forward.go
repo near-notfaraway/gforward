@@ -3,24 +3,43 @@ package protocol
 import (
 	"encoding/binary"
 	"fmt"
+	"net"
+	"strconv"
 )
 
 type ForwardPacket struct {
-	destination string // 目标主机和端口
-	payload     []byte // 需要转发的原始负载
+	addr    string // 目标主机地址
+	port    uint16 // 目标主机端口
+	payload []byte // 需要转发的原始负载
 }
 
 func (p *ForwardPacket) New() InternalPacket {
 	return &ForwardPacket{}
 }
 
+// Marshal 将目标地址、二进制端口和负载编码为一帧转发数据。
 func (p *ForwardPacket) Marshal() ([]byte, error) {
-	buf := make([]byte, 4+len(p.destination)+len(p.payload))
+	if len(p.addr) == 0 {
+		return nil, fmt.Errorf("address is empty")
+	}
+	if len(p.addr) > 255 {
+		return nil, fmt.Errorf("address is too long: %d", len(p.addr))
+	}
+	if p.port == 0 {
+		return nil, fmt.Errorf("port is zero")
+	}
+	if len(p.payload) > 65535 {
+		return nil, fmt.Errorf("payload is too long: %d", len(p.payload))
+	}
+
+	buf := make([]byte, 5+len(p.addr)+len(p.payload))
 	pos := 0
-	binary.BigEndian.PutUint16(buf[pos:pos+2], uint16(len(p.destination)))
+	buf[pos] = byte(len(p.addr))
+	pos++
+	copy(buf[pos:pos+len(p.addr)], p.addr)
+	pos += len(p.addr)
+	binary.BigEndian.PutUint16(buf[pos:pos+2], p.port)
 	pos += 2
-	copy(buf[pos:pos+len(p.destination)], p.destination)
-	pos += len(p.destination)
 	binary.BigEndian.PutUint16(buf[pos:pos+2], uint16(len(p.payload)))
 	pos += 2
 	copy(buf[pos:pos+len(p.payload)], p.payload)
@@ -29,28 +48,37 @@ func (p *ForwardPacket) Marshal() ([]byte, error) {
 
 // Unmarshal 从缓冲区解析一帧目标地址和负载，并返回实际消费的字节数。
 func (p *ForwardPacket) Unmarshal(buf []byte) (int, ParseState, error) {
-	if len(buf) < 2 {
+	if len(buf) < 1 {
 		return 0, ParseNeedMoreData, nil
 	}
 	pos := 0
-	destinationLen := int(binary.BigEndian.Uint16(buf[pos : pos+2]))
-	pos += 2
-	if destinationLen == 0 {
-		return 0, ParseRejected, fmt.Errorf("destination is empty")
+	addrLen := int(buf[pos])
+	pos++
+	if addrLen == 0 {
+		return 0, ParseRejected, fmt.Errorf("address is empty")
 	}
-	if 4+destinationLen > len(buf) {
+	if 5+addrLen > len(buf) {
 		return 0, ParseNeedMoreData, nil
 	}
-	p.destination = string(buf[pos : pos+destinationLen])
-	pos += destinationLen
+	addr := string(buf[pos : pos+addrLen])
+	pos += addrLen
+	port := binary.BigEndian.Uint16(buf[pos : pos+2])
+	pos += 2
+	if port == 0 {
+		return 0, ParseRejected, fmt.Errorf("port is zero")
+	}
 	payloadLen := int(binary.BigEndian.Uint16(buf[pos : pos+2]))
 	pos += 2
-	if 4+destinationLen+payloadLen > len(buf) {
+	if pos+payloadLen > len(buf) {
 		return 0, ParseNeedMoreData, nil
 	}
-	p.payload = make([]byte, payloadLen)
-	copy(p.payload, buf[pos:pos+payloadLen])
+	payload := make([]byte, payloadLen)
+	copy(payload, buf[pos:pos+payloadLen])
 	pos += payloadLen
+
+	p.addr = addr
+	p.port = port
+	p.payload = payload
 	return pos, ParseDone, nil
 }
 
@@ -63,9 +91,25 @@ func (p *ForwardPacket) SetPayload(payload []byte) {
 }
 
 func (p *ForwardPacket) GetDestination() string {
-	return p.destination
+	if p.addr == "" || p.port == 0 {
+		return ""
+	}
+	return net.JoinHostPort(p.addr, strconv.Itoa(int(p.port)))
 }
 
 func (p *ForwardPacket) SetDestination(destination string) {
-	p.destination = destination
+	addr, portText, err := net.SplitHostPort(destination)
+	if err != nil {
+		p.addr = ""
+		p.port = 0
+		return
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil || port == 0 {
+		p.addr = ""
+		p.port = 0
+		return
+	}
+	p.addr = addr
+	p.port = uint16(port)
 }

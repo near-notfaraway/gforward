@@ -71,6 +71,97 @@ curl -x http://127.0.0.1:8080 http://example.com/
 curl -x http://127.0.0.1:8080 https://example.com/
 ```
 
+## 通过 Agent Skill 使用
+
+仓库提供了 [`gforward-user-guide`](.agents/skills/gforward-user-guide/SKILL.md)，可让支持 Agent Skills 的编码助手完成环境检查、安装、模式选择、启动、验证和故障排查。
+
+### 仓库级使用
+
+克隆仓库后，在仓库目录中启动支持 `.agents/skills` 的 Agent。Agent 会发现项目内的 Skill，无需额外安装：
+
+```bash
+git clone https://github.com/near-notfaraway/gforward.git
+cd gforward
+```
+
+### 使用 npx skills 安装
+
+已安装 Node.js/npm 时，可使用 [skills CLI](https://github.com/vercel-labs/skills) 从 GitHub 安装 Skill：
+
+```bash
+# 安装到当前项目，交互式选择目标 Agent
+npx skills add near-notfaraway/gforward --skill gforward-user-guide
+
+# 安装到用户级目录，在所有项目中使用
+npx skills add near-notfaraway/gforward \
+  --skill gforward-user-guide \
+  --global
+```
+
+查看安装结果：
+
+```bash
+npx skills list
+npx skills list --global
+```
+
+在 CI 或其他非交互环境中，可添加 `--yes` 跳过确认。安装完成后重新打开 Agent 会话，使其重新扫描 Skill。
+
+### 手动安装为用户级 Skill
+
+没有 Node.js/npm 时，可手动安装到用户级通用目录：
+
+```bash
+install -d "$HOME/.agents/skills/gforward-user-guide"
+install -m 0644 \
+  ".agents/skills/gforward-user-guide/SKILL.md" \
+  "$HOME/.agents/skills/gforward-user-guide/SKILL.md"
+```
+
+手动安装后同样需要重新打开 Agent 会话。
+
+### 使用示例
+
+正常情况下直接描述 gforward 需求即可，Agent 会根据 Skill 的触发描述自动使用 `gforward-user-guide`。
+
+安装当前源码：
+
+```text
+检查本机环境并从当前源码安装 gforward，安装后告诉我二进制路径。
+```
+
+启动并验证本机 HTTP Proxy：
+
+```text
+在本机启动 gforward server 和 HTTP Proxy client，并用 curl 验证 HTTP、HTTPS 代理。
+```
+
+通过 SSH Tunnel 安全部署：
+
+```text
+通过 SSH Tunnel 部署 gforward。远端是 user@server.example.com，
+server 只监听回环地址，本地 HTTP Proxy 监听 127.0.0.1:8080。
+```
+
+配置其他接入模式：
+
+```text
+帮我配置 gforward SOCKS5。
+帮我在局域网配置 gforward HTTPS DNS 透明代理。
+帮我配置 gforward Shadowsocks 入站，不要在输出中显示密码。
+```
+
+排查问题：
+
+```text
+排查 gforward client 无法连接 server 的问题；先检查监听端口和网络连通性，
+不要通过开放公网防火墙来绕过问题。
+```
+
+如果所用 Agent 没有自动触发，可再显式指定“使用 `gforward-user-guide`”。
+
+Skill 会优先采用用户级安装和回环地址监听；涉及 `sudo`、防火墙、DNS、系统服务或公网暴露时，会先检查风险和必要条件。
+
 ## 使用方式
 
 ### HTTP Proxy
