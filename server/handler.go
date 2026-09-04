@@ -179,7 +179,7 @@ func (h *msgHandler) start() {
 	}()
 
 	// 下行循环独占一个 goroutine，与上行并行以提升云端吞吐；反向映射的注册竞态由 bindDial 在 OnOpen 提前完成来消除。
-	// 这与 client 将下行/就绪/拨号失败收敛到单 goroutine 的取舍相对偶，背景见 .agent 第 11 节。
+	// 这与 client 将下行/就绪/拨号失败收敛到单 goroutine 的取舍相对偶
 	go func() {
 		for msg := range h.dialer.RecvChan() {
 			h.handleDestMsg(msg)

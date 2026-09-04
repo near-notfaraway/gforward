@@ -35,6 +35,6 @@ func (p *HTTPParser) Parse(conn gnet.Conn) (ParseResult, error) {
 
 	return ParseResult{
 		Status:      ParseDone,
-		Destination: httpReq.Host,
+		Destination: extractDestWithPort(httpReq.Host, 80),
 	}, nil
 }
